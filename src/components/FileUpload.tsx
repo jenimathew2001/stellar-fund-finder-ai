@@ -115,11 +115,22 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
         throw new Error('The file appears to be empty or contains no data rows.');
       }
 
-      // Define possible column name variations
-      const companyNameVariations = ['company_name', 'Company Name', 'company name', 'Company', 'company', 'name', 'Name'];
-      const dateRaisedVariations = ['date_raised', 'Date Raised', 'date raised', 'Date', 'date', 'funding date', 'Funding Date'];
-      const amountRaisedVariations = ['amount_raised', 'Amount Raised', 'amount raised', 'Amount', 'amount', 'funding amount', 'Funding Amount', 'raised', 'Raised'];
-      const investorsVariations = ['investors', 'Investors', 'investor', 'Investor', 'vc', 'VC', 'fund', 'Fund'];
+      // Define possible column name variations - Updated with your new column names
+      const companyNameVariations = [
+        'company_name', 'Company Name', 'company name', 'Company', 'company', 'name', 'Name',
+        'Organization Name', 'organization name', 'organization', 'Organization'
+      ];
+      const dateRaisedVariations = [
+        'date_raised', 'Date Raised', 'date raised', 'Date', 'date', 'funding date', 'Funding Date',
+        'Announced Date', 'announced date', 'announcement date', 'Announcement Date'
+      ];
+      const amountRaisedVariations = [
+        'amount_raised', 'Amount Raised', 'amount raised', 'Amount', 'amount', 'funding amount', 'Funding Amount', 'raised', 'Raised'
+      ];
+      const investorsVariations = [
+        'investors', 'Investors', 'investor', 'Investor', 'vc', 'VC', 'fund', 'Fund',
+        'Lead Investors', 'lead investors', 'lead investor', 'Lead Investor'
+      ];
 
       const processedData: Omit<FundraiseData, 'id'>[] = [];
 
@@ -275,13 +286,13 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
         <div className="text-sm text-gray-300 space-y-2">
           <p><strong>Required columns (flexible naming):</strong></p>
           <ul className="list-disc list-inside space-y-1 ml-4">
-            <li><strong>Company Name:</strong> "Company Name", "company_name", "Company", or "Name"</li>
-            <li><strong>Date Raised:</strong> "Date Raised", "date_raised", "Date", or "Funding Date"</li>
+            <li><strong>Company Name:</strong> "Company Name", "Organization Name", "company_name", "Company", or "Name"</li>
+            <li><strong>Date Raised:</strong> "Date Raised", "Announced Date", "date_raised", "Date", or "Funding Date"</li>
             <li><strong>Amount Raised:</strong> "Amount Raised", "amount_raised", "Amount", or "Funding Amount"</li>
-            <li><strong>Investors:</strong> "Investors", "investors", "Investor", "VC", or "Fund"</li>
+            <li><strong>Investors:</strong> "Investors", "Lead Investors", "investors", "Investor", "VC", or "Fund"</li>
           </ul>
           <p className="text-xs text-gray-400 mt-3">
-            <strong>Note:</strong> Only Company Name is required. Other fields will default to "Not specified" if missing.
+            <strong>Note:</strong> Only Company Name (or Organization Name) is required. Other fields will default to "Not specified" if missing.
           </p>
         </div>
       </div>
