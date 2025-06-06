@@ -51,36 +51,46 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
     }
   };
 
+  const normalizeColumnName = (name: string): string => {
+    return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  };
+
+  const findColumnValue = (row: any, possibleNames: string[]): string => {
+    // First try exact matches
+    for (const name of possibleNames) {
+      if (row[name] !== undefined && row[name] !== null && row[name] !== '') {
+        return String(row[name]).trim();
+      }
+    }
+    
+    // Then try normalized matches
+    const rowKeys = Object.keys(row);
+    for (const name of possibleNames) {
+      const normalizedTarget = normalizeColumnName(name);
+      for (const key of rowKeys) {
+        if (normalizeColumnName(key) === normalizedTarget && row[key] !== undefined && row[key] !== null && row[key] !== '') {
+          return String(row[key]).trim();
+        }
+      }
+    }
+    
+    return '';
+  };
+
   const processFile = useCallback(async (file: File) => {
     setIsProcessing(true);
     const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
     try {
-      let processedData: Omit<FundraiseData, 'id'>[] = [];
+      let rawData: any[] = [];
 
       if (fileExtension === 'csv') {
         await new Promise((resolve, reject) => {
           Papa.parse(file, {
             header: true,
             complete: (results) => {
-              try {
-                processedData = results.data
-                  .filter((row: any) => row.company_name || row['Company Name'])
-                  .map((row: any) => ({
-                    company_name: row.company_name || row['Company Name'] || '',
-                    date_raised: row.date_raised || row['Date Raised'] || '',
-                    amount_raised: row.amount_raised || row['Amount Raised'] || '',
-                    investors: row.investors || row['Investors'] || '',
-                    status: 'pending' as const,
-                  }));
-
-                if (processedData.length === 0) {
-                  throw new Error('No valid data found in CSV');
-                }
-                resolve(processedData);
-              } catch (error) {
-                reject(error);
-              }
+              rawData = results.data;
+              resolve(rawData);
             },
             error: (error) => {
               reject(new Error(`CSV parsing error: ${error.message}`));
@@ -93,23 +103,51 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet);
-
-        processedData = jsonData
-          .filter((row: any) => row.company_name || row['Company Name'])
-          .map((row: any) => ({
-            company_name: row.company_name || row['Company Name'] || '',
-            date_raised: row.date_raised || row['Date Raised'] || '',
-            amount_raised: row.amount_raised || row['Amount Raised'] || '',
-            investors: row.investors || row['Investors'] || '',
-            status: 'pending' as const,
-          }));
-
-        if (processedData.length === 0) {
-          throw new Error('No valid data found in Excel file');
-        }
+        rawData = XLSX.utils.sheet_to_json(worksheet);
       } else {
         throw new Error('Unsupported file type. Please upload a CSV or XLSX file.');
+      }
+
+      console.log('Raw data from file:', rawData);
+      console.log('First row keys:', rawData.length > 0 ? Object.keys(rawData[0]) : 'No data');
+
+      if (!rawData || rawData.length === 0) {
+        throw new Error('The file appears to be empty or contains no data rows.');
+      }
+
+      // Define possible column name variations
+      const companyNameVariations = ['company_name', 'Company Name', 'company name', 'Company', 'company', 'name', 'Name'];
+      const dateRaisedVariations = ['date_raised', 'Date Raised', 'date raised', 'Date', 'date', 'funding date', 'Funding Date'];
+      const amountRaisedVariations = ['amount_raised', 'Amount Raised', 'amount raised', 'Amount', 'amount', 'funding amount', 'Funding Amount', 'raised', 'Raised'];
+      const investorsVariations = ['investors', 'Investors', 'investor', 'Investor', 'vc', 'VC', 'fund', 'Fund'];
+
+      const processedData: Omit<FundraiseData, 'id'>[] = [];
+
+      for (let i = 0; i < rawData.length; i++) {
+        const row = rawData[i];
+        
+        const companyName = findColumnValue(row, companyNameVariations);
+        const dateRaised = findColumnValue(row, dateRaisedVariations);
+        const amountRaised = findColumnValue(row, amountRaisedVariations);
+        const investors = findColumnValue(row, investorsVariations);
+
+        // Only include rows that have at least a company name
+        if (companyName) {
+          processedData.push({
+            company_name: companyName,
+            date_raised: dateRaised || 'Not specified',
+            amount_raised: amountRaised || 'Not specified',
+            investors: investors || 'Not specified',
+            status: 'pending' as const,
+          });
+        }
+      }
+
+      console.log('Processed data:', processedData);
+
+      if (processedData.length === 0) {
+        const availableColumns = rawData.length > 0 ? Object.keys(rawData[0]).join(', ') : 'None';
+        throw new Error(`No valid data found. Make sure your file has a column for company names. Available columns: ${availableColumns}`);
       }
 
       // Save to Supabase
@@ -235,13 +273,16 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
       <div className="mt-8 bg-black/20 backdrop-blur-sm border border-gray-700 rounded-lg p-6">
         <h4 className="text-lg font-semibold text-white mb-3">Expected CSV/XLSX Format:</h4>
         <div className="text-sm text-gray-300 space-y-2">
-          <p><strong>Required columns:</strong></p>
+          <p><strong>Required columns (flexible naming):</strong></p>
           <ul className="list-disc list-inside space-y-1 ml-4">
-            <li>Company Name</li>
-            <li>Date Raised</li>
-            <li>Amount Raised</li>
-            <li>Investors</li>
+            <li><strong>Company Name:</strong> "Company Name", "company_name", "Company", or "Name"</li>
+            <li><strong>Date Raised:</strong> "Date Raised", "date_raised", "Date", or "Funding Date"</li>
+            <li><strong>Amount Raised:</strong> "Amount Raised", "amount_raised", "Amount", or "Funding Amount"</li>
+            <li><strong>Investors:</strong> "Investors", "investors", "Investor", "VC", or "Fund"</li>
           </ul>
+          <p className="text-xs text-gray-400 mt-3">
+            <strong>Note:</strong> Only Company Name is required. Other fields will default to "Not specified" if missing.
+          </p>
         </div>
       </div>
     </div>
