@@ -1,10 +1,10 @@
-
 import { useState, useCallback } from "react";
 import { Upload, FileSpreadsheet, AlertCircle } from "lucide-react";
 import * as XLSX from "xlsx";
 import Papa from "papaparse";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 
 interface FundraiseData {
   id: string;
@@ -24,99 +24,121 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
 
-  const processFile = useCallback((file: File) => {
+  const saveToSupabase = async (processedData: Omit<FundraiseData, 'id'>[]) => {
+    try {
+      const dataToInsert = processedData.map(row => ({
+        company_name: row.company_name,
+        date_raised: row.date_raised,
+        amount_raised: row.amount_raised,
+        investors: row.investors,
+        status: 'pending' as const
+      }));
+
+      const { data, error } = await supabase
+        .from('fundraise_data')
+        .insert(dataToInsert)
+        .select();
+
+      if (error) {
+        console.error('Supabase error:', error);
+        throw new Error(`Database error: ${error.message}`);
+      }
+
+      return data;
+    } catch (error) {
+      console.error('Error saving to database:', error);
+      throw error;
+    }
+  };
+
+  const processFile = useCallback(async (file: File) => {
     setIsProcessing(true);
     const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
-    if (fileExtension === 'csv') {
-      Papa.parse(file, {
-        header: true,
-        complete: (results) => {
-          try {
-            const processedData = results.data
-              .filter((row: any) => row.company_name || row['Company Name'])
-              .map((row: any, index: number) => ({
-                id: `row-${index}`,
-                company_name: row.company_name || row['Company Name'] || '',
-                date_raised: row.date_raised || row['Date Raised'] || '',
-                amount_raised: row.amount_raised || row['Amount Raised'] || '',
-                investors: row.investors || row['Investors'] || '',
-                status: 'pending' as const,
-              }));
+    try {
+      let processedData: Omit<FundraiseData, 'id'>[] = [];
 
-            if (processedData.length === 0) {
-              throw new Error('No valid data found in CSV');
+      if (fileExtension === 'csv') {
+        await new Promise((resolve, reject) => {
+          Papa.parse(file, {
+            header: true,
+            complete: (results) => {
+              try {
+                processedData = results.data
+                  .filter((row: any) => row.company_name || row['Company Name'])
+                  .map((row: any) => ({
+                    company_name: row.company_name || row['Company Name'] || '',
+                    date_raised: row.date_raised || row['Date Raised'] || '',
+                    amount_raised: row.amount_raised || row['Amount Raised'] || '',
+                    investors: row.investors || row['Investors'] || '',
+                    status: 'pending' as const,
+                  }));
+
+                if (processedData.length === 0) {
+                  throw new Error('No valid data found in CSV');
+                }
+                resolve(processedData);
+              } catch (error) {
+                reject(error);
+              }
+            },
+            error: (error) => {
+              reject(new Error(`CSV parsing error: ${error.message}`));
             }
-
-            onFileUpload(processedData);
-            toast({
-              title: "File uploaded successfully!",
-              description: `Processed ${processedData.length} records`,
-            });
-          } catch (error) {
-            toast({
-              title: "Error processing CSV",
-              description: "Please check your file format and try again",
-              variant: "destructive",
-            });
-          }
-          setIsProcessing(false);
-        },
-        error: (error) => {
-          toast({
-            title: "Error reading CSV",
-            description: error.message,
-            variant: "destructive",
           });
-          setIsProcessing(false);
+        });
+      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+        const arrayBuffer = await file.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+        processedData = jsonData
+          .filter((row: any) => row.company_name || row['Company Name'])
+          .map((row: any) => ({
+            company_name: row.company_name || row['Company Name'] || '',
+            date_raised: row.date_raised || row['Date Raised'] || '',
+            amount_raised: row.amount_raised || row['Amount Raised'] || '',
+            investors: row.investors || row['Investors'] || '',
+            status: 'pending' as const,
+          }));
+
+        if (processedData.length === 0) {
+          throw new Error('No valid data found in Excel file');
         }
-      });
-    } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const data = new Uint8Array(e.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(data, { type: 'array' });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet);
+      } else {
+        throw new Error('Unsupported file type. Please upload a CSV or XLSX file.');
+      }
 
-          const processedData = jsonData
-            .filter((row: any) => row.company_name || row['Company Name'])
-            .map((row: any, index: number) => ({
-              id: `row-${index}`,
-              company_name: row.company_name || row['Company Name'] || '',
-              date_raised: row.date_raised || row['Date Raised'] || '',
-              amount_raised: row.amount_raised || row['Amount Raised'] || '',
-              investors: row.investors || row['Investors'] || '',
-              status: 'pending' as const,
-            }));
+      // Save to Supabase
+      const savedData = await saveToSupabase(processedData);
+      
+      // Convert saved data to match the expected interface
+      const dataWithIds: FundraiseData[] = savedData.map(item => ({
+        id: item.id,
+        company_name: item.company_name,
+        date_raised: item.date_raised,
+        amount_raised: item.amount_raised,
+        investors: item.investors,
+        status: item.status as 'pending' | 'processing' | 'completed' | 'error'
+      }));
 
-          if (processedData.length === 0) {
-            throw new Error('No valid data found in Excel file');
-          }
-
-          onFileUpload(processedData);
-          toast({
-            title: "File uploaded successfully!",
-            description: `Processed ${processedData.length} records`,
-          });
-        } catch (error) {
-          toast({
-            title: "Error processing Excel file",
-            description: "Please check your file format and try again",
-            variant: "destructive",
-          });
-        }
-        setIsProcessing(false);
-      };
-      reader.readAsArrayBuffer(file);
-    } else {
+      onFileUpload(dataWithIds);
       toast({
-        title: "Unsupported file type",
-        description: "Please upload a CSV or XLSX file",
+        title: "File uploaded successfully!",
+        description: `Processed and saved ${savedData.length} records to database`,
+      });
+
+    } catch (error) {
+      console.error('File processing error:', error);
+      toast({
+        title: "Error processing file",
+        description: error instanceof Error ? error.message : "Please check your file format and try again",
         variant: "destructive",
       });
+    } finally {
       setIsProcessing(false);
     }
   }, [onFileUpload, toast]);
@@ -165,7 +187,7 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
         {isProcessing ? (
           <div className="space-y-4">
             <div className="animate-spin mx-auto h-12 w-12 border-4 border-blue-400 border-t-transparent rounded-full"></div>
-            <p className="text-gray-300">Processing your file...</p>
+            <p className="text-gray-300">Processing and saving your file...</p>
           </div>
         ) : (
           <div className="space-y-6">
