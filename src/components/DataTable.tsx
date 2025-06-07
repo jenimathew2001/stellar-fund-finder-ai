@@ -44,6 +44,24 @@ export const DataTable = ({ data }: DataTableProps) => {
     );
   };
 
+  const renderPressUrl = (url: string | undefined, index: number) => {
+    if (!url || url === 'N/A') {
+      return <span className="text-gray-500 text-xs">N/A</span>;
+    }
+    
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-blue-400 hover:text-blue-300 text-xs flex items-center gap-1"
+      >
+        <ExternalLink className="h-3 w-3" />
+        Link {index}
+      </a>
+    );
+  };
+
   const exportToCSV = () => {
     const headers = [
       'Company Name',
@@ -98,12 +116,14 @@ export const DataTable = ({ data }: DataTableProps) => {
         <Table>
           <TableHeader>
             <TableRow className="border-gray-700">
-              <TableHead className="text-gray-300">Company</TableHead>
+              <TableHead className="text-gray-300 min-w-[150px]">Company</TableHead>
               <TableHead className="text-gray-300">Date</TableHead>
               <TableHead className="text-gray-300">Amount</TableHead>
-              <TableHead className="text-gray-300">Investors</TableHead>
-              <TableHead className="text-gray-300">Press URLs</TableHead>
-              <TableHead className="text-gray-300">Contacts</TableHead>
+              <TableHead className="text-gray-300 min-w-[150px]">Investors</TableHead>
+              <TableHead className="text-gray-300">Press URL 1</TableHead>
+              <TableHead className="text-gray-300">Press URL 2</TableHead>
+              <TableHead className="text-gray-300">Press URL 3</TableHead>
+              <TableHead className="text-gray-300 min-w-[200px]">Investor Names</TableHead>
               <TableHead className="text-gray-300">Status</TableHead>
             </TableRow>
           </TableHeader>
@@ -119,31 +139,24 @@ export const DataTable = ({ data }: DataTableProps) => {
                   {row.investors}
                 </TableCell>
                 <TableCell>
-                  <div className="flex flex-col gap-1">
-                    {[row.press_url_1, row.press_url_2, row.press_url_3]
-                      .filter(Boolean)
-                      .map((url, index) => (
-                        <a
-                          key={index}
-                          href={url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-400 hover:text-blue-300 text-xs flex items-center gap-1"
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                          URL {index + 1}
-                        </a>
-                      ))}
-                  </div>
+                  {renderPressUrl(row.press_url_1, 1)}
+                </TableCell>
+                <TableCell>
+                  {renderPressUrl(row.press_url_2, 2)}
+                </TableCell>
+                <TableCell>
+                  {renderPressUrl(row.press_url_3, 3)}
                 </TableCell>
                 <TableCell className="text-gray-300 max-w-xs">
-                  {row.investor_contacts ? (
+                  {row.investor_contacts && row.investor_contacts !== 'N/A' ? (
                     <div className="text-xs">
-                      {row.investor_contacts.split(',').slice(0, 2).join(', ')}
-                      {row.investor_contacts.split(',').length > 2 && '...'}
+                      {row.investor_contacts.length > 100 
+                        ? `${row.investor_contacts.substring(0, 100)}...`
+                        : row.investor_contacts
+                      }
                     </div>
                   ) : (
-                    <span className="text-gray-500">-</span>
+                    <span className="text-gray-500">N/A</span>
                   )}
                 </TableCell>
                 <TableCell>{getStatusBadge(row.status)}</TableCell>
