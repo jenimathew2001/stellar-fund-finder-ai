@@ -28,9 +28,13 @@ const Index = () => {
     setData(uploadedData);
   };
 
+  const handleDataUpdate = (updatedData: FundraiseData[]) => {
+    setData(updatedData);
+  };
+
   const startProcessing = () => {
     setIsProcessing(true);
-    // This will be implemented with the actual processing logic
+    // This will be handled by ProcessingStatus component
   };
 
   return (
@@ -99,6 +103,8 @@ const Index = () => {
                 currentItem={currentProcessing}
                 onStartProcessing={startProcessing}
                 totalItems={data.length}
+                data={data}
+                onDataUpdate={handleDataUpdate}
               />
             </div>
             <div className="transform hover:scale-[1.01] transition-transform duration-300">
