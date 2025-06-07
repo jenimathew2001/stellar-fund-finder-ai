@@ -50,11 +50,8 @@ serve(async (req) => {
       .update({ status: 'processing' })
       .eq('id', recordId);
 
-    // Add delay to handle rate limiting
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
     // Search for press releases using SERP API
-    const pressUrls = await searchPressReleases(record.company_name, record.date_raised);
+    const pressUrls = await searchPressReleases(record.company_name, record.investors);
     console.log('Found press URLs:', pressUrls);
 
     // Extract investor contacts from the press releases
@@ -116,67 +113,76 @@ serve(async (req) => {
   }
 });
 
-async function searchPressReleases(companyName: string, dateRaised: string): Promise<string[]> {
+async function searchPressReleases(companyName: string, investors: string): Promise<string[]> {
   const serpApiKey = Deno.env.get('SERP_API_KEY');
   if (!serpApiKey) {
     throw new Error('SERP_API_KEY not configured');
   }
 
-  // Try multiple search variations to increase chances of finding results
-  const searchQueries = [
-    `"${companyName}" funding press release ${dateRaised}`,
-    `"${companyName}" raises funding ${new Date().getFullYear()}`,
-    `"${companyName}" investment announcement`,
-    `${companyName} funding round`
-  ];
+  // Primary search query similar to your working code
+  const query = `${companyName} funding ${investors} press release`;
+  console.log('Search query:', query);
+  
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      api_key: serpApiKey,
+      num: '10',
+      engine: 'google',
+      hl: 'en',
+      gl: 'us'
+    });
 
-  const allUrls: string[] = [];
-
-  for (const query of searchQueries) {
-    console.log('Search query:', query);
+    const response = await fetch(`https://serpapi.com/search?${params.toString()}`);
     
-    try {
-      // Add delay between requests to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!response.ok) {
+      console.error('SERP API error:', response.status, response.statusText);
       
-      const response = await fetch(`https://serpapi.com/search?engine=google&q=${encodeURIComponent(query)}&api_key=${serpApiKey}&hl=en&gl=us&num=5`);
+      // Fallback to broader search
+      console.log('Trying broader search...');
+      const fallbackParams = new URLSearchParams({
+        q: `${companyName} funding news`,
+        api_key: serpApiKey,
+        num: '10',
+        engine: 'google'
+      });
       
-      if (!response.ok) {
-        if (response.status === 429) {
-          console.log('Rate limited, waiting longer...');
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          continue;
-        }
-        throw new Error(`SERP API error: ${response.statusText}`);
+      const fallbackResponse = await fetch(`https://serpapi.com/search?${fallbackParams.toString()}`);
+      if (!fallbackResponse.ok) {
+        throw new Error(`SERP API error: ${fallbackResponse.statusText}`);
       }
-
-      const data = await response.json();
-      const organicResults = data.organic_results || [];
       
-      const urls = organicResults
-        .slice(0, 2)
-        .map((result: any) => result.link)
-        .filter((url: string) => url && isRelevantPressUrl(url, companyName));
+      const fallbackData = await fallbackResponse.json();
+      const fallbackResults = fallbackData.organic_results || [];
+      const urls = fallbackResults.slice(0, 3).map((result: any) => result.link).filter((url: string) => url);
       
-      allUrls.push(...urls);
+      // Pad with empty strings if needed
+      while (urls.length < 3) {
+        urls.push('N/A');
+      }
       
-      if (allUrls.length >= 3) break;
-      
-    } catch (error) {
-      console.error('Error in search query:', query, error);
-      continue;
+      return urls;
     }
-  }
 
-  // Remove duplicates and take top 3
-  const uniqueUrls = [...new Set(allUrls)].slice(0, 3);
-  
-  // Pad with empty strings if we don't have enough URLs
-  while (uniqueUrls.length < 3) {
-    uniqueUrls.push('');
+    const data = await response.json();
+    const organicResults = data.organic_results || [];
+    
+    const urls = organicResults
+      .slice(0, 3)
+      .map((result: any) => result.link)
+      .filter((url: string) => url && isRelevantPressUrl(url, companyName));
+    
+    // Pad with N/A if we don't have enough URLs
+    while (urls.length < 3) {
+      urls.push('N/A');
+    }
+    
+    return urls;
+    
+  } catch (error) {
+    console.error('Error in search query:', error);
+    return ['N/A', 'N/A', 'N/A'];
   }
-  
-  return uniqueUrls;
 }
 
 function isRelevantPressUrl(url: string, companyName: string): boolean {
@@ -190,32 +196,94 @@ function isRelevantPressUrl(url: string, companyName: string): boolean {
          url.toLowerCase().includes(companyName.toLowerCase().replace(/\s+/g, ''));
 }
 
+async function fetchArticleText(url: string): Promise<string> {
+  if (url === 'N/A') {
+    return '';
+  }
+
+  // Blocked domains that typically block scrapers
+  const blockedDomains = ['facebook.com', 'twitter.com', 'linkedin.com'];
+  if (blockedDomains.some(domain => url.includes(domain))) {
+    console.log(`Skipping blocked domain: ${url}`);
+    return '';
+  }
+
+  try {
+    console.log(`Fetching article from: ${url}`);
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+
+    if (!response.ok) {
+      console.error(`Failed to fetch ${url}: ${response.statusText}`);
+      return '';
+    }
+
+    const html = await response.text();
+    
+    // Simple text extraction - look for common content patterns
+    const textMatch = html.match(/<p[^>]*>(.*?)<\/p>/gi);
+    if (textMatch) {
+      const text = textMatch
+        .map(p => p.replace(/<[^>]*>/g, '').trim())
+        .filter(text => text.length > 50)
+        .join(' ')
+        .slice(0, 2000); // Limit text size
+      
+      return text;
+    }
+    
+    return '';
+  } catch (error) {
+    console.error(`Error fetching article from ${url}:`, error);
+    return '';
+  }
+}
+
 async function extractInvestorContacts(pressUrls: string[], companyName: string): Promise<string> {
   const groqApiKey = Deno.env.get('GROQ_API_KEY');
   if (!groqApiKey) {
     throw new Error('GROQ_API_KEY not configured');
   }
 
-  // Filter out empty URLs
-  const validUrls = pressUrls.filter(url => url && url.trim() !== '');
+  // Filter out N/A URLs
+  const validUrls = pressUrls.filter(url => url && url !== 'N/A');
   
   if (validUrls.length === 0) {
-    return 'No press releases found';
+    return 'N/A';
   }
 
-  const prompt = `Given these press release URLs about ${companyName} fundraising:
-${validUrls.join('\n')}
+  // Fetch text from all valid URLs
+  const allTexts: string[] = [];
+  for (const url of validUrls) {
+    const text = await fetchArticleText(url);
+    if (text) {
+      allTexts.push(text);
+    }
+  }
 
-Based on typical venture capital and angel investor patterns, extract the names of individual investors (VCs, Angels, Partners, Managing Directors) who might be involved in this funding round.
+  const combinedText = allTexts.join('\n\n').slice(0, 4000); // Limit total text
+  
+  if (!combinedText.trim()) {
+    return 'N/A';
+  }
 
-Look for patterns like:
-- "led by [Name] at [Firm]"
-- "[Name], partner at [Firm]"
-- "investors include [Name] from [Firm]"
+  const prompt = `You are a helpful analyst extracting **investor-side individuals** from press releases.
 
-Return the names in this format: Name (Company), Name (Company)
+Instructions:
+- Extract full names of people who represent the INVESTORS (VCs, Angels, Funds, etc.)
+- Add their **firm** in parentheses: John Smith (Sequoia)
+- Only return actual human names, NOT organizations alone
+- Return "N/A" if no people are named.
 
-If you cannot determine specific individual names, return "Check URLs manually for investor contacts".`;
+Example Output:
+Sarah Kim (Accel), Anil Gupta (SoftBank)
+
+Article:
+${combinedText}`;
 
   try {
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -229,7 +297,7 @@ If you cannot determine specific individual names, return "Check URLs manually f
         messages: [
           {
             role: 'system',
-            content: 'You are a research assistant that extracts investor contact information from press release URLs. Focus on individual names and their companies. Be conservative and only extract names you are confident about.'
+            content: 'You are a financial analyst who extracts investor names from press releases. Focus on individual people, not just company names.'
           },
           {
             role: 'user',
@@ -246,16 +314,18 @@ If you cannot determine specific individual names, return "Check URLs manually f
     }
 
     const data = await response.json();
-    const result = data.choices[0]?.message?.content || 'Unable to extract contacts';
+    const result = data.choices[0]?.message?.content || 'N/A';
     
-    // If the result looks meaningful, return it, otherwise provide a helpful message
-    if (result.includes('(') && result.includes(')')) {
-      return result;
-    } else {
-      return `Check press releases manually: ${validUrls.slice(0, 2).join(', ')}`;
+    console.log('LLM CONTENT:', result);
+    
+    // Clean up the result
+    if (result.includes('N/A') || result.toLowerCase().includes('no individual') || result.toLowerCase().includes('no people')) {
+      return 'N/A';
     }
+    
+    return result.trim();
   } catch (error) {
     console.error('Error extracting investor contacts:', error);
-    return 'Error extracting contacts - check URLs manually';
+    return 'N/A';
   }
 }
