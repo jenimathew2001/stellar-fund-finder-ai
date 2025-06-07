@@ -56,65 +56,99 @@ export const ProcessingStatus = ({
       return;
     }
 
+    console.log(`🚀 Starting enrichment for ${pendingItems.length} pending items`);
     let processedCount = 0;
 
     for (const item of pendingItems) {
       setCurrentProcessingItem(item.company_name);
       
       try {
-        console.log('Processing item:', item.id, item.company_name);
+        console.log(`📋 Processing: ${item.company_name} (${processedCount + 1}/${pendingItems.length})`);
         
+        // Call the edge function
         const { data: result, error } = await supabase.functions.invoke('enrich-fundraise-data', {
           body: { recordId: item.id }
         });
 
         if (error) {
-          console.error('Error processing item:', error);
+          console.error('❌ Error processing item:', error);
           toast({
             title: "Processing error",
             description: `Failed to process ${item.company_name}: ${error.message}`,
             variant: "destructive",
           });
+          
+          // Update local data to show error status
+          if (onDataUpdate) {
+            const updatedData = data.map(dataItem => 
+              dataItem.id === item.id ? { ...dataItem, status: 'error' as const } : dataItem
+            );
+            onDataUpdate(updatedData);
+          }
         } else {
-          console.log('Successfully processed:', result);
+          console.log('✅ Successfully processed:', item.company_name, result);
           processedCount++;
           setProcessed(processedCount);
           
           // Fetch the updated record from database to get the enriched data
-          const { data: updatedRecord } = await supabase
+          const { data: updatedRecord, error: fetchError } = await supabase
             .from('fundraise_data')
             .select('*')
             .eq('id', item.id)
             .single();
           
-          // Update the local data with the enriched record, properly typing the status
-          if (onDataUpdate && updatedRecord) {
-            const typedRecord: FundraiseData = {
-              ...updatedRecord,
-              status: updatedRecord.status as 'pending' | 'processing' | 'completed' | 'error'
-            };
-            
-            const updatedData = data.map(dataItem => 
-              dataItem.id === item.id ? typedRecord : dataItem
-            );
-            onDataUpdate(updatedData);
+          if (fetchError) {
+            console.error('❌ Error fetching updated record:', fetchError);
+          } else {
+            // Update the local data with the enriched record
+            if (onDataUpdate && updatedRecord) {
+              const typedRecord: FundraiseData = {
+                ...updatedRecord,
+                status: updatedRecord.status as 'pending' | 'processing' | 'completed' | 'error'
+              };
+              
+              console.log('📊 Updating local data with enriched record:', typedRecord);
+              
+              const updatedData = data.map(dataItem => 
+                dataItem.id === item.id ? typedRecord : dataItem
+              );
+              onDataUpdate(updatedData);
+            }
           }
+          
+          toast({
+            title: "Item processed",
+            description: `Successfully processed ${item.company_name}`,
+          });
         }
       } catch (error) {
-        console.error('Unexpected error:', error);
+        console.error('💥 Unexpected error processing:', item.company_name, error);
         toast({
           title: "Unexpected error",
           description: `Failed to process ${item.company_name}`,
           variant: "destructive",
         });
+        
+        // Update local data to show error status
+        if (onDataUpdate) {
+          const updatedData = data.map(dataItem => 
+            dataItem.id === item.id ? { ...dataItem, status: 'error' as const } : dataItem
+          );
+          onDataUpdate(updatedData);
+        }
       }
 
       // Add delay between requests to avoid overwhelming the system
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      if (processedCount < pendingItems.length - 1) {
+        console.log('⏳ Waiting 3 seconds before next item...');
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
     }
 
     setLocalIsProcessing(false);
     setCurrentProcessingItem("");
+    
+    console.log(`🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`);
     
     toast({
       title: "Processing complete",
@@ -126,6 +160,7 @@ export const ProcessingStatus = ({
   const completedCount = data.filter(item => item.status === 'completed').length;
   const errorCount = data.filter(item => item.status === 'error').length;
   const pendingCount = data.filter(item => item.status === 'pending').length;
+  const processingCount = data.filter(item => item.status === 'processing').length;
 
   return (
     <div className="bg-black/20 backdrop-blur-sm border border-gray-700 rounded-xl p-6">
@@ -139,7 +174,7 @@ export const ProcessingStatus = ({
             className="bg-gradient-to-r from-green-500 to-blue-600 hover:from-green-600 hover:to-blue-700 text-white border-0"
           >
             <Play className="h-4 w-4 mr-2" />
-            Start AI Enrichment
+            Start AI Enrichment ({pendingCount} pending)
           </Button>
         ) : (
           <div className="flex items-center gap-2">
@@ -167,7 +202,7 @@ export const ProcessingStatus = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-6">
         <div className="bg-gray-800/50 rounded-lg p-4 text-center">
           <CheckCircle className="h-8 w-8 text-green-400 mx-auto mb-2" />
           <div className="text-2xl font-bold text-white">{completedCount}</div>
@@ -176,14 +211,20 @@ export const ProcessingStatus = ({
         
         <div className="bg-gray-800/50 rounded-lg p-4 text-center">
           <RotateCcw className="h-8 w-8 text-blue-400 mx-auto mb-2" />
-          <div className="text-2xl font-bold text-white">{actuallyProcessing ? 1 : 0}</div>
-          <div className="text-sm text-gray-400">In Progress</div>
+          <div className="text-2xl font-bold text-white">{processingCount}</div>
+          <div className="text-sm text-gray-400">Processing</div>
         </div>
         
         <div className="bg-gray-800/50 rounded-lg p-4 text-center">
           <AlertCircle className="h-8 w-8 text-yellow-400 mx-auto mb-2" />
-          <div className="text-2xl font-bold text-white">{pendingCount + errorCount}</div>
+          <div className="text-2xl font-bold text-white">{pendingCount}</div>
           <div className="text-sm text-gray-400">Pending</div>
+        </div>
+
+        <div className="bg-gray-800/50 rounded-lg p-4 text-center">
+          <AlertCircle className="h-8 w-8 text-red-400 mx-auto mb-2" />
+          <div className="text-2xl font-bold text-white">{errorCount}</div>
+          <div className="text-sm text-gray-400">Errors</div>
         </div>
       </div>
     </div>
