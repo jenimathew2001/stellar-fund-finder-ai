@@ -1,4 +1,3 @@
-
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -16,7 +15,7 @@ interface FundraiseData {
   press_url_2?: string;
   press_url_3?: string;
   investor_contacts?: string;
-  status: 'pending' | 'processing' | 'completed' | 'error';
+  status: "pending" | "processing" | "completed" | "error";
 }
 
 interface ProcessingStatusProps {
@@ -44,9 +43,9 @@ export const ProcessingStatus = ({
   const startEnrichment = async () => {
     setLocalIsProcessing(true);
     setProcessed(0);
-    
-    const pendingItems = data.filter(item => item.status === 'pending');
-    
+
+    const pendingItems = data.filter((item) => item.status === "pending");
+
     if (pendingItems.length === 0) {
       toast({
         title: "No items to process",
@@ -56,100 +55,111 @@ export const ProcessingStatus = ({
       return;
     }
 
-    console.log(`🚀 Starting enrichment for ${pendingItems.length} pending items`);
+    console.log(
+      `🚀 Starting enrichment for ${pendingItems.length} pending items`
+    );
     let processedCount = 0;
 
     for (const item of pendingItems) {
       setCurrentProcessingItem(item.company_name);
-      
+
       try {
-        console.log(`📋 Processing: ${item.company_name} (${processedCount + 1}/${pendingItems.length})`);
-        
+        console.log(
+          `📋 Processing: ${item.company_name} (${processedCount + 1}/${
+            pendingItems.length
+          })`
+        );
+
         // Call the edge function
-        const { data: result, error } = await supabase.functions.invoke('enrich-fundraise-data', {
-          body: { recordId: item.id }
-        });
+        const { data: result, error } = await supabase.functions.invoke(
+          "enrich-fundraise-data",
+          {
+            body: item,
+          }
+        );
 
         if (error) {
-          console.error('❌ Error processing item:', error);
+          console.error("❌ Error processing item:", error);
           toast({
             title: "Processing error",
             description: `Failed to process ${item.company_name}: ${error.message}`,
             variant: "destructive",
           });
-          
+
           // Update local data to show error status
           if (onDataUpdate) {
-            const updatedData = data.map(dataItem => 
-              dataItem.id === item.id ? { ...dataItem, status: 'error' as const } : dataItem
+            const updatedData = data.map((dataItem) =>
+              dataItem.id === item.id
+                ? { ...dataItem, status: "error" as const }
+                : dataItem
             );
             onDataUpdate(updatedData);
           }
         } else {
-          console.log('✅ Successfully processed:', item.company_name, result);
+          console.log("✅ Successfully processed:", item.company_name, result);
           processedCount++;
-          setProcessed(processedCount);
-          
+
+          const updatedRecord = result;
           // Fetch the updated record from database to get the enriched data
-          const { data: updatedRecord, error: fetchError } = await supabase
-            .from('fundraise_data')
-            .select('*')
-            .eq('id', item.id)
-            .single();
-          
-          if (fetchError) {
-            console.error('❌ Error fetching updated record:', fetchError);
-          } else {
-            // Update the local data with the enriched record
-            if (onDataUpdate && updatedRecord) {
-              const typedRecord: FundraiseData = {
-                ...updatedRecord,
-                status: updatedRecord.status as 'pending' | 'processing' | 'completed' | 'error'
-              };
-              
-              console.log('📊 Updating local data with enriched record:', typedRecord);
-              
-              const updatedData = data.map(dataItem => 
-                dataItem.id === item.id ? typedRecord : dataItem
-              );
-              onDataUpdate(updatedData);
-            }
+
+          // Update the local data with the enriched record
+          if (onDataUpdate && updatedRecord) {
+            const typedRecord: FundraiseData = updatedRecord;
+
+            console.log(
+              "📊 Updating local data with enriched record:",
+              typedRecord
+            );
+
+            data = data.map((dataItem) =>
+              dataItem.id === item.id ? typedRecord : dataItem
+            );
+            onDataUpdate(data);
           }
-          
+
           toast({
             title: "Item processed",
             description: `Successfully processed ${item.company_name}`,
           });
         }
       } catch (error) {
-        console.error('💥 Unexpected error processing:', item.company_name, error);
+        console.error(
+          "💥 Unexpected error processing:",
+          item.company_name,
+          error
+        );
         toast({
           title: "Unexpected error",
           description: `Failed to process ${item.company_name}`,
           variant: "destructive",
         });
-        
+
         // Update local data to show error status
         if (onDataUpdate) {
-          const updatedData = data.map(dataItem => 
-            dataItem.id === item.id ? { ...dataItem, status: 'error' as const } : dataItem
+          const updatedData = data.map((dataItem) =>
+            dataItem.id === item.id
+              ? { ...dataItem, status: "error" as const }
+              : dataItem
           );
           onDataUpdate(updatedData);
         }
       }
 
+      setProcessed(processedCount);
       // Add delay between requests to avoid overwhelming the system
       if (processedCount < pendingItems.length - 1) {
-        console.log('⏳ Waiting 3 seconds before next item...');
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        console.log("⏳ Waiting 1 seconds before next item...");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
 
     setLocalIsProcessing(false);
     setCurrentProcessingItem("");
-    
-    console.log(`🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`);
-    
+
+    console.log(
+      `🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`
+    );
+
     toast({
       title: "Processing complete",
       description: `Successfully processed ${processedCount} of ${pendingItems.length} items`,
@@ -157,16 +167,20 @@ export const ProcessingStatus = ({
   };
 
   const actuallyProcessing = isProcessing || localIsProcessing;
-  const completedCount = data.filter(item => item.status === 'completed').length;
-  const errorCount = data.filter(item => item.status === 'error').length;
-  const pendingCount = data.filter(item => item.status === 'pending').length;
-  const processingCount = data.filter(item => item.status === 'processing').length;
+  const completedCount = data.filter(
+    (item) => item.status === "completed"
+  ).length;
+  const errorCount = data.filter((item) => item.status === "error").length;
+  const pendingCount = data.filter((item) => item.status === "pending").length;
+  const processingCount = data.filter(
+    (item) => item.status === "processing"
+  ).length;
 
   return (
     <div className="bg-black/20 backdrop-blur-sm border border-gray-700 rounded-xl p-6">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-2xl font-bold text-white">AI Processing Status</h2>
-        
+
         {!actuallyProcessing ? (
           <Button
             onClick={startEnrichment}
@@ -188,15 +202,18 @@ export const ProcessingStatus = ({
         <div className="space-y-4">
           <div className="flex items-center justify-between text-sm">
             <span className="text-gray-300">
-              Processing: <span className="text-blue-400 font-medium">{currentProcessingItem || currentItem}</span>
+              Processing:{" "}
+              <span className="text-blue-400 font-medium">
+                {currentProcessingItem || currentItem}
+              </span>
             </span>
             <span className="text-gray-300">
               {completedCount} / {totalItems}
             </span>
           </div>
-          
-          <Progress 
-            value={(completedCount / totalItems) * 100} 
+
+          <Progress
+            value={(completedCount / totalItems) * 100}
             className="h-2 bg-gray-800"
           />
         </div>
@@ -208,13 +225,13 @@ export const ProcessingStatus = ({
           <div className="text-2xl font-bold text-white">{completedCount}</div>
           <div className="text-sm text-gray-400">Completed</div>
         </div>
-        
+
         <div className="bg-gray-800/50 rounded-lg p-4 text-center">
           <RotateCcw className="h-8 w-8 text-blue-400 mx-auto mb-2" />
           <div className="text-2xl font-bold text-white">{processingCount}</div>
           <div className="text-sm text-gray-400">Processing</div>
         </div>
-        
+
         <div className="bg-gray-800/50 rounded-lg p-4 text-center">
           <AlertCircle className="h-8 w-8 text-yellow-400 mx-auto mb-2" />
           <div className="text-2xl font-bold text-white">{pendingCount}</div>
