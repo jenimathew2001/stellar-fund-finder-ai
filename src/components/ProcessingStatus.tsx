@@ -87,10 +87,15 @@ export const ProcessingStatus = ({
             .eq('id', item.id)
             .single();
           
-          // Update the local data with the enriched record
+          // Update the local data with the enriched record, properly typing the status
           if (onDataUpdate && updatedRecord) {
+            const typedRecord: FundraiseData = {
+              ...updatedRecord,
+              status: updatedRecord.status as 'pending' | 'processing' | 'completed' | 'error'
+            };
+            
             const updatedData = data.map(dataItem => 
-              dataItem.id === item.id ? updatedRecord : dataItem
+              dataItem.id === item.id ? typedRecord : dataItem
             );
             onDataUpdate(updatedData);
           }
