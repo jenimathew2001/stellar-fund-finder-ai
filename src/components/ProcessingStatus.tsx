@@ -12,6 +12,10 @@ interface FundraiseData {
   date_raised: string;
   amount_raised: string;
   investors: string;
+  press_url_1?: string;
+  press_url_2?: string;
+  press_url_3?: string;
+  investor_contacts?: string;
   status: 'pending' | 'processing' | 'completed' | 'error';
 }
 
@@ -76,12 +80,17 @@ export const ProcessingStatus = ({
           processedCount++;
           setProcessed(processedCount);
           
-          // Update the local data
-          if (onDataUpdate) {
+          // Fetch the updated record from database to get the enriched data
+          const { data: updatedRecord } = await supabase
+            .from('fundraise_data')
+            .select('*')
+            .eq('id', item.id)
+            .single();
+          
+          // Update the local data with the enriched record
+          if (onDataUpdate && updatedRecord) {
             const updatedData = data.map(dataItem => 
-              dataItem.id === item.id 
-                ? { ...dataItem, status: 'completed' as const }
-                : dataItem
+              dataItem.id === item.id ? updatedRecord : dataItem
             );
             onDataUpdate(updatedData);
           }
@@ -94,6 +103,9 @@ export const ProcessingStatus = ({
           variant: "destructive",
         });
       }
+
+      // Add delay between requests to avoid overwhelming the system
+      await new Promise(resolve => setTimeout(resolve, 3000));
     }
 
     setLocalIsProcessing(false);

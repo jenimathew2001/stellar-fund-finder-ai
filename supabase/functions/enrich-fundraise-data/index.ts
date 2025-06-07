@@ -50,12 +50,15 @@ serve(async (req) => {
       .update({ status: 'processing' })
       .eq('id', recordId);
 
+    // Add delay to handle rate limiting
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
     // Search for press releases using SERP API
     const pressUrls = await searchPressReleases(record.company_name, record.date_raised);
     console.log('Found press URLs:', pressUrls);
 
     // Extract investor contacts from the press releases
-    const investorContacts = await extractInvestorContacts(pressUrls);
+    const investorContacts = await extractInvestorContacts(pressUrls, record.company_name);
     console.log('Extracted investor contacts:', investorContacts);
 
     // Update the record with enriched data
@@ -119,34 +122,75 @@ async function searchPressReleases(companyName: string, dateRaised: string): Pro
     throw new Error('SERP_API_KEY not configured');
   }
 
-  const query = `${companyName} funding press release ${dateRaised}`;
-  console.log('Search query:', query);
+  // Try multiple search variations to increase chances of finding results
+  const searchQueries = [
+    `"${companyName}" funding press release ${dateRaised}`,
+    `"${companyName}" raises funding ${new Date().getFullYear()}`,
+    `"${companyName}" investment announcement`,
+    `${companyName} funding round`
+  ];
 
-  try {
-    const response = await fetch(`https://serpapi.com/search?engine=google&q=${encodeURIComponent(query)}&api_key=${serpApiKey}&hl=en&gl=us&num=10`);
-    
-    if (!response.ok) {
-      throw new Error(`SERP API error: ${response.statusText}`);
-    }
+  const allUrls: string[] = [];
 
-    const data = await response.json();
-    const organicResults = data.organic_results || [];
+  for (const query of searchQueries) {
+    console.log('Search query:', query);
     
-    const urls = organicResults.slice(0, 3).map((result: any) => result.link).filter(Boolean);
-    
-    // Pad with empty strings if we don't have 3 URLs
-    while (urls.length < 3) {
-      urls.push('');
+    try {
+      // Add delay between requests to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const response = await fetch(`https://serpapi.com/search?engine=google&q=${encodeURIComponent(query)}&api_key=${serpApiKey}&hl=en&gl=us&num=5`);
+      
+      if (!response.ok) {
+        if (response.status === 429) {
+          console.log('Rate limited, waiting longer...');
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
+        }
+        throw new Error(`SERP API error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const organicResults = data.organic_results || [];
+      
+      const urls = organicResults
+        .slice(0, 2)
+        .map((result: any) => result.link)
+        .filter((url: string) => url && isRelevantPressUrl(url, companyName));
+      
+      allUrls.push(...urls);
+      
+      if (allUrls.length >= 3) break;
+      
+    } catch (error) {
+      console.error('Error in search query:', query, error);
+      continue;
     }
-    
-    return urls;
-  } catch (error) {
-    console.error('Error searching press releases:', error);
-    return ['', '', ''];
   }
+
+  // Remove duplicates and take top 3
+  const uniqueUrls = [...new Set(allUrls)].slice(0, 3);
+  
+  // Pad with empty strings if we don't have enough URLs
+  while (uniqueUrls.length < 3) {
+    uniqueUrls.push('');
+  }
+  
+  return uniqueUrls;
 }
 
-async function extractInvestorContacts(pressUrls: string[]): Promise<string> {
+function isRelevantPressUrl(url: string, companyName: string): boolean {
+  const relevantDomains = [
+    'techcrunch.com', 'venturebeat.com', 'crunchbase.com', 'businesswire.com',
+    'prnewswire.com', 'reuters.com', 'bloomberg.com', 'forbes.com',
+    'wsj.com', 'ft.com', 'spacenews.com', 'spaceflightnow.com'
+  ];
+  
+  return relevantDomains.some(domain => url.includes(domain)) || 
+         url.toLowerCase().includes(companyName.toLowerCase().replace(/\s+/g, ''));
+}
+
+async function extractInvestorContacts(pressUrls: string[], companyName: string): Promise<string> {
   const groqApiKey = Deno.env.get('GROQ_API_KEY');
   if (!groqApiKey) {
     throw new Error('GROQ_API_KEY not configured');
@@ -159,12 +203,17 @@ async function extractInvestorContacts(pressUrls: string[]): Promise<string> {
     return 'No press releases found';
   }
 
-  const prompt = `Given these press release URLs about a startup fundraising round:
+  const prompt = `Given these press release URLs about ${companyName} fundraising:
 ${validUrls.join('\n')}
 
-Please extract the names of people involved from the investor side (VCs, Angels, Firm Partners, Managing Directors, etc.) that might be mentioned in articles at these URLs.
+Based on typical venture capital and angel investor patterns, extract the names of individual investors (VCs, Angels, Partners, Managing Directors) who might be involved in this funding round.
 
-Return the names in this format: Name (Company), Name (Company), Name (Company)
+Look for patterns like:
+- "led by [Name] at [Firm]"
+- "[Name], partner at [Firm]"
+- "investors include [Name] from [Firm]"
+
+Return the names in this format: Name (Company), Name (Company)
 
 If you cannot determine specific individual names, return "Check URLs manually for investor contacts".`;
 
@@ -180,7 +229,7 @@ If you cannot determine specific individual names, return "Check URLs manually f
         messages: [
           {
             role: 'system',
-            content: 'You are a research assistant that extracts investor contact information from press release URLs. Focus on individual names and their companies.'
+            content: 'You are a research assistant that extracts investor contact information from press release URLs. Focus on individual names and their companies. Be conservative and only extract names you are confident about.'
           },
           {
             role: 'user',
@@ -197,9 +246,16 @@ If you cannot determine specific individual names, return "Check URLs manually f
     }
 
     const data = await response.json();
-    return data.choices[0]?.message?.content || 'Unable to extract contacts';
+    const result = data.choices[0]?.message?.content || 'Unable to extract contacts';
+    
+    // If the result looks meaningful, return it, otherwise provide a helpful message
+    if (result.includes('(') && result.includes(')')) {
+      return result;
+    } else {
+      return `Check press releases manually: ${validUrls.slice(0, 2).join(', ')}`;
+    }
   } catch (error) {
     console.error('Error extracting investor contacts:', error);
-    return 'Error extracting contacts';
+    return 'Error extracting contacts - check URLs manually';
   }
 }
