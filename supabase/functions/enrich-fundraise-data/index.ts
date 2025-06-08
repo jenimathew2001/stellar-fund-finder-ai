@@ -110,7 +110,7 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
   console.log("\n✅ Using GPT results for all fields");
   return {
     press_url_1: gptResult.urls[0] || "N/A",
-    press_url_2: gptResult.urls[1] || "N/A",
+    press_url_2: gptResult.urls[1] || "N/A", 
     press_url_3: gptResult.urls[2] || "N/A",
     investor_contacts: gptResult.investor_contacts,
     amount_raised: gptResult.amount_raised
@@ -125,16 +125,24 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   }
 
   try {
+    let allUrls: AnalyzedUrl[] = [];
+
     // First try press release sites
     const pressQuery = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`;
     console.log(`\n🔍 SERP search 1: "${pressQuery}"`);
 
-    let urls = await performSerpSearch(pressQuery, serpApiKey, record.company_name);
+    const pressUrls = await performSerpSearch(pressQuery, serpApiKey, record.company_name);
+    allUrls = [...allUrls, ...pressUrls.map(url => ({
+      url,
+      keywordCount: 3, // Priority for press release sites
+      keywords: ['press', 'release', 'funding']
+    }))];
     
-    // If we found high-quality results (2 or more relevant URLs), return early
-    if (urls.length >= 2) {
+    // If we found high-quality results (2 or more unique relevant URLs), return early
+    const uniquePressUrls = getUniqueUrls(allUrls);
+    if (uniquePressUrls.length >= 2) {
       console.log("\n✨ Found multiple high-quality press release URLs, stopping search");
-      return {success: true, urls};
+      return {success: true, urls: uniquePressUrls.slice(0, 3)};
     }
 
     // If not enough results, try a broader search
@@ -142,12 +150,17 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     console.log(`\n🔍 SERP search 2: "${broadQuery}"`);
 
     const broadResults = await performSerpSearch(broadQuery, serpApiKey, record.company_name);
-    urls = [...new Set([...urls, ...broadResults])]; // Combine and deduplicate
+    allUrls = [...allUrls, ...broadResults.map(url => ({
+      url,
+      keywordCount: 2,
+      keywords: ['funding', 'raises']
+    }))];
 
-    // If we now have enough results, return
-    if (urls.length >= 2) {
+    // Check unique URLs again
+    const uniqueBroadUrls = getUniqueUrls(allUrls);
+    if (uniqueBroadUrls.length >= 2) {
       console.log("\n✨ Found enough high-quality URLs from broad search, stopping");
-      return {success: true, urls};
+      return {success: true, urls: uniqueBroadUrls.slice(0, 3)};
     }
 
     // Final attempt with tech news sites
@@ -155,11 +168,17 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     console.log(`\n🔍 SERP search 3: "${techQuery}"`);
 
     const techResults = await performSerpSearch(techQuery, serpApiKey, record.company_name);
-    urls = [...new Set([...urls, ...techResults])]; // Combine and deduplicate
+    allUrls = [...allUrls, ...techResults.map(url => ({
+      url,
+      keywordCount: 1,
+      keywords: ['investment']
+    }))];
 
+    // Get final unique URLs
+    const finalUrls = getUniqueUrls(allUrls);
     return {
-      success: urls.length > 0,
-      urls: urls.slice(0, 3) // Return max 3 URLs
+      success: finalUrls.length > 0,
+      urls: finalUrls.slice(0, 3)
     };
   } catch (error) {
     console.error("❌ SERP search failed:", error instanceof Error ? error.message : 'Unknown error');
@@ -170,8 +189,24 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   }
 }
 
+// Helper function to get unique URLs prioritized by keywordCount
+function getUniqueUrls(analyzedUrls: AnalyzedUrl[]): string[] {
+  // First deduplicate by URL
+  const uniqueMap = new Map<string, AnalyzedUrl>();
+  for (const item of analyzedUrls) {
+    if (!uniqueMap.has(item.url) || uniqueMap.get(item.url)!.keywordCount < item.keywordCount) {
+      uniqueMap.set(item.url, item);
+    }
+  }
+
+  // Convert back to array and sort by keywordCount
+  return Array.from(uniqueMap.values())
+    .sort((a, b) => b.keywordCount - a.keywordCount)
+    .map(item => item.url);
+}
+
 async function performSerpSearch(query: string, apiKey: string, companyName: string): Promise<string[]> {
-  const response = await fetch(
+      const response = await fetch(
     `https://serpapi.com/search.json?` + new URLSearchParams({
       q: query,
       api_key: apiKey,
@@ -179,15 +214,15 @@ async function performSerpSearch(query: string, apiKey: string, companyName: str
       gl: "us",
       num: "10"
     })
-  );
+      );
 
-  if (!response.ok) {
+      if (!response.ok) {
     throw new Error(`SERP API error: ${response.status}`);
-  }
+      }
 
-  const data = await response.json();
-  const organicResults = data.organic_results || [];
-  
+      const data = await response.json();
+      const organicResults = data.organic_results || [];
+      
   console.log(`\n📊 Found ${organicResults.length} results`);
 
   // Analyze content of each URL
@@ -324,7 +359,7 @@ async function extractDataFromUrls(urls: string[], record: FundraiseData): Promi
       console.log(`\n💰 Using provided amount: ${amount}`);
     }
 
-    return {
+  return { 
       investor_contacts: investorInfo,
       amount_raised: amount,
       urls: urls
@@ -428,6 +463,61 @@ async function extractInvestorNamesWithLLM(
     return "N/A";
   }
 
+  // Try multiple approaches in sequence
+  let result = "N/A";
+
+  // 1. Try Groq first if available
+  if (groqApiKey) {
+    try {
+      result = await tryGroqExtraction(text, companyName, knownInvestors, groqApiKey);
+      if (result !== "N/A") {
+        console.log("✅ Successfully extracted investors using Groq");
+        return result;
+      }
+    } catch (error) {
+      if (error.message === "Rate limit" && openaiApiKey) {
+        console.log("⚠️ Groq API rate limit hit, trying OpenAI");
+      } else {
+        console.error("❌ Groq extraction failed:", error);
+      }
+    }
+  }
+
+  // 2. Try OpenAI if available
+  if (openaiApiKey) {
+    try {
+      result = await tryOpenAIExtraction(text, companyName, knownInvestors, openaiApiKey);
+      if (result !== "N/A") {
+        console.log("✅ Successfully extracted investors using OpenAI");
+        return result;
+      }
+    } catch (error) {
+      console.error("❌ OpenAI extraction failed:", error);
+    }
+  }
+
+  // 3. If still no results, try direct investor lookup
+  if (openaiApiKey && knownInvestors) {
+    try {
+      result = await tryInvestorLookup(companyName, knownInvestors, openaiApiKey);
+      if (result !== "N/A") {
+        console.log("✅ Successfully found investors through direct lookup");
+        return result;
+      }
+    } catch (error) {
+      console.error("❌ Investor lookup failed:", error);
+    }
+  }
+
+  return "N/A";
+}
+
+async function tryGroqExtraction(
+  text: string,
+  companyName: string,
+  knownInvestors: string,
+  apiKey: string
+): Promise<string> {
   const prompt = `Extract investor information from this press release about ${companyName}'s funding round.
 
 CONTEXT:
@@ -451,120 +541,187 @@ ${text.slice(0, 6000)}
 
 Return ONLY the formatted investor names:`;
 
-  // Try Groq first if available
-  if (groqApiKey) {
-    try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${groqApiKey}`,
-          "Content-Type": "application/json",
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "llama3-8b-8192",
+      messages: [
+        {
+          role: "system",
+          content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
         },
-        body: JSON.stringify({
-          model: "llama3-8b-8192",
-          messages: [
-            {
-              role: "system",
-              content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 300,
-        }),
-      });
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 300,
+    }),
+  });
 
-      if (!response.ok) {
-        if (response.status === 429) {
-          console.log("⚠️ Groq API rate limit hit, falling back to OpenAI");
-          throw new Error("Rate limit");
-        }
-        throw new Error(`Groq API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const result = data.choices[0]?.message?.content || "N/A";
-
-      console.log("🤖 LLaMA extracted investor names:", result);
-
-      // Validate the result format
-      if (
-        result.toLowerCase().includes("n/a") ||
-        result.toLowerCase().includes("no individual") ||
-        result.toLowerCase().includes("not found") ||
-        !result.includes("(") || // Must have parentheses for firm names
-        result.trim().length < 5
-      ) {
-        return "N/A";
-      }
-
-      return result.trim();
-    } catch (error) {
-      // If it's not a rate limit error and we don't have OpenAI as fallback, return N/A
-      if (error.message !== "Rate limit" || !openaiApiKey) {
-        console.error("💥 Error extracting investor names:", error);
-        return "N/A";
-      }
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error("Rate limit");
     }
+    throw new Error(`Groq API error: ${response.status}`);
   }
 
-  // OpenAI fallback
-  if (openaiApiKey) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${openaiApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "gpt-3.5-turbo",
-          messages: [
-            {
-              role: "system",
-              content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 300,
-        }),
-      });
+  const data = await response.json();
+  const result = data.choices[0]?.message?.content || "N/A";
 
-      if (!response.ok) {
-        throw new Error(`OpenAI API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const result = data.choices[0]?.message?.content || "N/A";
-
-      console.log("🤖 GPT extracted investor names:", result);
-
-      // Validate the result format
-      if (
-        result.toLowerCase().includes("n/a") ||
-        result.toLowerCase().includes("no individual") ||
-        result.toLowerCase().includes("not found") ||
-        !result.includes("(") || // Must have parentheses for firm names
-        result.trim().length < 5
-      ) {
-        return "N/A";
-      }
-
-      return result.trim();
-    } catch (error) {
-      console.error("💥 Error extracting investor names with OpenAI:", error);
-      return "N/A";
-    }
+  if (
+    result.toLowerCase().includes("n/a") ||
+    result.toLowerCase().includes("no individual") ||
+    result.toLowerCase().includes("not found") ||
+    !result.includes("(") ||
+    result.trim().length < 5
+  ) {
+    return "N/A";
   }
 
-  return "N/A";
+  return result.trim();
+}
+
+async function tryOpenAIExtraction(
+  text: string,
+  companyName: string,
+  knownInvestors: string,
+  apiKey: string
+): Promise<string> {
+  const prompt = `Extract investor information from this press release about ${companyName}'s funding round.
+
+CONTEXT:
+Company: ${companyName}
+Known Investors: ${knownInvestors}
+
+TASK:
+1. Find INDIVIDUAL PEOPLE who are investors or represent investment firms
+2. Include their full names and associated firms
+3. Focus on lead investors, partners, managing directors, and key decision-makers
+4. DO NOT include employees or executives of ${companyName}
+
+FORMAT:
+- Return names as: "Full Name (Firm Name)"
+- Separate multiple investors with commas
+- Example: "John Smith (Acme Ventures), Jane Doe (XYZ Capital)"
+- If no individual names found, return "N/A"
+
+PRESS RELEASE TEXT:
+${text.slice(0, 6000)}
+
+Return ONLY the formatted investor names:`;
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 300,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const result = data.choices[0]?.message?.content || "N/A";
+
+  if (
+    result.toLowerCase().includes("n/a") ||
+    result.toLowerCase().includes("no individual") ||
+    result.toLowerCase().includes("not found") ||
+    !result.includes("(") ||
+    result.trim().length < 5
+  ) {
+    return "N/A";
+  }
+
+  return result.trim();
+}
+
+async function tryInvestorLookup(
+  companyName: string,
+  knownInvestors: string,
+  apiKey: string
+): Promise<string> {
+  const prompt = `Find the names of individual investors or investment firm representatives for ${companyName}.
+
+Company: ${companyName}
+Known Investment Firms/Investors: ${knownInvestors}
+Date: ${new Date().getFullYear()}
+
+Task:
+1. Based on the known investors/firms provided, identify specific individuals who are likely to be involved
+2. Focus on partners, managing directors, or key decision-makers at the mentioned firms
+3. Use your knowledge of the venture capital industry
+4. If multiple people from the same firm, prioritize the most senior/relevant ones
+
+Format your response as: "Full Name (Firm Name)" with multiple names separated by commas
+Example: "John Smith (Acme Ventures), Jane Doe (XYZ Capital)"
+
+Return ONLY the formatted names, or "N/A" if no confident matches:`;
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4",
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert in venture capital and startup investments. Return only properly formatted investor names or 'N/A'."
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 300,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const result = data.choices[0]?.message?.content || "N/A";
+
+  if (
+    result.toLowerCase().includes("n/a") ||
+    result.toLowerCase().includes("no individual") ||
+    result.toLowerCase().includes("not found") ||
+    !result.includes("(") ||
+    result.trim().length < 5
+  ) {
+    return "N/A";
+  }
+
+  return result.trim();
 }
 
 async function extractAmountWithLLM(content: string, companyName: string): Promise<string> {
@@ -593,10 +750,10 @@ Return ONLY the amount, nothing else.`;
 
   // Try Groq first if available
   if (groqApiKey) {
-    try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
           "Authorization": `Bearer ${groqApiKey}`,
           "Content-Type": "application/json"
         },
@@ -640,30 +797,30 @@ Return ONLY the amount, nothing else.`;
         method: "POST",
         headers: {
           Authorization: `Bearer ${openaiApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
           model: "gpt-3.5-turbo",
-          messages: [
-            {
-              role: "system",
+        messages: [
+          {
+            role: "system",
               content: "You are a precise extractor of funding amounts from press releases. Return only the amount or 'N/A'."
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 50,
-        }),
-      });
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 50,
+      }),
+    });
 
-      if (!response.ok) {
+    if (!response.ok) {
         throw new Error(`OpenAI API error: ${response.status}`);
-      }
+    }
 
-      const data = await response.json();
+    const data = await response.json();
       const amount = data.choices[0].message.content.trim();
       return amount === "N/A" ? "N/A" : amount;
     } catch (error) {
