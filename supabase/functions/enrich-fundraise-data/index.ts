@@ -242,7 +242,7 @@ export async function searchFundingPressReleasesGoogle(
   const API_KEY = Deno.env.get("GOOGLE_API");
   const CX = Deno.env.get("GOOGLE_CX");
 
-  const query = `${record.company_name} funding round investors ${
+  const query = `${record.company_name} funding round "investors" ${
     record.investors || ""
   }`;
   const url = `https://www.googleapis.com/customsearch/v1?key=${API_KEY}&cx=${CX}&q=${encodeURIComponent(
@@ -260,6 +260,7 @@ export async function searchFundingPressReleasesGoogle(
     const urls: string[] =
       data.items?.map((item: any) => item.link).slice(0, 3) || [];
 
+    console.log("Found urls from google api ", urls);
     return { urls };
   } catch (error) {
     console.error("Error fetching press releases:", error);
