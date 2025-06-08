@@ -30,29 +30,15 @@ serve(async (req) => {
     const record: FundraiseData = await req.json();
     console.log("🔄 Processing record:", record.company_name);
 
-    // Search for press releases with multiple strategies
-    const pressData = await searchAndExtractPressData(
-      record.company_name,
-      record.investors,
-      record.date_raised
-    );
+    // Search for press releases with SERP API first, then GPT fallback
+    const enrichedData = await enrichRecordData(record);
 
-    console.log("📰 Final press data:", pressData);
-
-    const updateData: Partial<FundraiseData> = {
-      press_url_1: pressData.urls[0] || "N/A",
-      press_url_2: pressData.urls[1] || "N/A", 
-      press_url_3: pressData.urls[2] || "N/A",
-      investor_contacts: pressData.investorNames || "N/A",
-      amount_raised: pressData.amountRaised || record.amount_raised,
-      status: "completed",
-    };
-
-    console.log("💾 Final update data:", updateData);
+    console.log("✅ Final enriched data:", enrichedData);
 
     const response: FundraiseData = {
       ...record,
-      ...updateData,
+      ...enrichedData,
+      status: "completed",
     };
 
     return new Response(JSON.stringify(response), {
@@ -72,109 +58,112 @@ serve(async (req) => {
   }
 });
 
-async function searchAndExtractPressData(
-  companyName: string,
-  investors: string,
-  dateRaised: string
-): Promise<{
-  urls: string[];
-  investorNames: string;
-  amountRaised: string;
-}> {
+async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
+  console.log(`🚀 Starting enrichment for ${record.company_name}`);
+  
+  // Step 1: Try SERP API approach
+  console.log("📡 Attempting SERP API approach...");
+  const serpResult = await trySerp(record);
+  
+  if (serpResult.success && serpResult.urls.length > 0) {
+    console.log("✅ SERP API successful, extracting content...");
+    const extractedData = await extractDataFromUrls(serpResult.urls, record);
+    
+    if (extractedData.investor_contacts !== "N/A" || extractedData.amount_raised !== "N/A") {
+      return {
+        press_url_1: serpResult.urls[0] || "N/A",
+        press_url_2: serpResult.urls[1] || "N/A",
+        press_url_3: serpResult.urls[2] || "N/A",
+        investor_contacts: extractedData.investor_contacts,
+        amount_raised: extractedData.amount_raised,
+      };
+    }
+  }
+  
+  console.log("🤖 SERP failed, trying GPT fallback...");
+  // Step 2: GPT fallback approach
+  const gptResult = await tryGPTFallback(record);
+  
+  return {
+    press_url_1: gptResult.urls[0] || "N/A",
+    press_url_2: gptResult.urls[1] || "N/A", 
+    press_url_3: gptResult.urls[2] || "N/A",
+    investor_contacts: gptResult.investor_contacts,
+    amount_raised: gptResult.amount_raised,
+  };
+}
+
+async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: string[]}> {
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) {
     console.error("❌ SERP_API_KEY not configured");
-    return { urls: [], investorNames: "N/A", amountRaised: "N/A" };
+    return {success: false, urls: []};
   }
 
   // Format date for search
   let searchYear = "";
-  if (dateRaised) {
-    const dateMatch = dateRaised.match(/\d{4}/);
+  if (record.date_raised) {
+    const dateMatch = record.date_raised.match(/\d{4}/);
     if (dateMatch) {
       searchYear = dateMatch[0];
-    } else if (!isNaN(Number(dateRaised))) {
-      const excelDate = new Date((Number(dateRaised) - 25569) * 86400 * 1000);
+    } else if (!isNaN(Number(record.date_raised))) {
+      const excelDate = new Date((Number(record.date_raised) - 25569) * 86400 * 1000);
       searchYear = excelDate.getFullYear().toString();
     }
   }
 
-  // Multiple targeted search strategies for press releases
+  // More targeted search queries for press releases
   const searchQueries = [
-    `"${companyName}" "funding" "press release" ${searchYear}`,
-    `"${companyName}" "raises" "investment" "announcement" ${searchYear}`,
-    `"${companyName}" "series" "funding" "round" ${searchYear}`,
-    `"${companyName}" "${investors}" "funding" "press release"`,
-    `"${companyName}" "funding" "TechCrunch" OR "VentureBeat" OR "BusinessWire"`,
-    `"${companyName}" "investment" "announcement" site:techcrunch.com OR site:venturebeat.com`,
-    `"${companyName}" "funding" site:businesswire.com OR site:prnewswire.com`,
+    `"${record.company_name}" "funding" "press release" ${searchYear} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`,
+    `"${record.company_name}" "raises" "million" "funding" ${searchYear}`,
+    `"${record.company_name}" "investment" "round" ${searchYear} site:techcrunch.com OR site:venturebeat.com`,
+    `"${record.company_name}" "${record.investors}" "funding" "announcement"`,
   ];
 
   let allUrls: string[] = [];
-  let searchCount = 0;
-  const maxSearches = 5;
-
-  for (const query of searchQueries) {
-    if (allUrls.length >= 5 || searchCount >= maxSearches) break;
-    
-    console.log(`🔎 Search ${searchCount + 1}: "${query}"`);
-    
+  
+  for (let i = 0; i < Math.min(searchQueries.length, 3); i++) {
     try {
-      if (searchCount > 0) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-
+      console.log(`🔍 SERP search ${i + 1}: "${searchQueries[i]}"`);
+      
       const response = await fetch(
-        `https://serpapi.com/search?q=${encodeURIComponent(query)}&api_key=${serpApiKey}&num=10&engine=google&hl=en&gl=us`
+        `https://serpapi.com/search?q=${encodeURIComponent(searchQueries[i])}&api_key=${serpApiKey}&num=5&engine=google&hl=en&gl=us`
       );
 
       if (!response.ok) {
-        if (response.status === 429) {
-          console.error("⚠️ Rate limit hit, stopping search");
-          break;
-        }
-        console.error("🚫 SERP API error:", response.status, response.statusText);
-        searchCount++;
+        console.error(`❌ SERP API error: ${response.status}`);
         continue;
       }
 
       const data = await response.json();
       const organicResults = data.organic_results || [];
       
-      console.log(`📊 Found ${organicResults.length} results for query`);
+      console.log(`📊 Found ${organicResults.length} results`);
 
       const urls = organicResults
         .map((result: any) => result.link)
-        .filter((url: string) => url && isPressReleaseUrl(url, companyName))
-        .slice(0, 3);
+        .filter((url: string) => url && isPressReleaseUrl(url, record.company_name))
+        .slice(0, 2);
 
-      console.log(`✅ Filtered to ${urls.length} press release URLs:`, urls);
-      
+      console.log(`✅ Filtered URLs: ${urls}`);
       allUrls.push(...urls);
-      allUrls = [...new Set(allUrls)]; // Remove duplicates
-      searchCount++;
-
+      
+      // Wait between requests to avoid rate limits
+      if (i < searchQueries.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     } catch (error) {
-      console.error("💥 Search error:", error);
-      searchCount++;
+      console.error(`❌ SERP search ${i + 1} failed:`, error);
     }
   }
 
-  const finalUrls = allUrls.slice(0, 3);
-  console.log(`📋 Final URLs (${finalUrls.length}):`, finalUrls);
-
-  if (finalUrls.length === 0) {
-    console.log("❌ No press release URLs found");
-    return { urls: [], investorNames: "N/A", amountRaised: "N/A" };
-  }
-
-  // Extract content and analyze with LLM
-  const extractedData = await extractDataFromUrls(finalUrls, companyName, investors);
-
+  // Remove duplicates and take top 3
+  const uniqueUrls = [...new Set(allUrls)].slice(0, 3);
+  console.log(`📋 Final SERP URLs: ${uniqueUrls}`);
+  
   return {
-    urls: finalUrls,
-    investorNames: extractedData.investorNames,
-    amountRaised: extractedData.amountRaised,
+    success: uniqueUrls.length > 0,
+    urls: uniqueUrls
   };
 }
 
@@ -182,98 +171,80 @@ function isPressReleaseUrl(url: string, companyName: string): boolean {
   const urlLower = url.toLowerCase();
   const companyLower = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-  // High-priority press release domains
+  // Priority domains for press releases
   const pressReleaseDomains = [
     "businesswire.com",
     "prnewswire.com", 
     "globenewswire.com",
-    "reuters.com",
-    "bloomberg.com",
     "techcrunch.com",
     "venturebeat.com",
-    "crunchbase.com",
-    "finance.yahoo.com",
-    "marketwatch.com",
+    "reuters.com",
+    "bloomberg.com",
+    "yahoo.com/finance",
     "benzinga.com",
-    "spacenews.com",
-    "spaceflightnow.com"
   ];
 
-  // Check for press release domains
   const hasPressReleaseDomain = pressReleaseDomains.some(domain => urlLower.includes(domain));
-  
-  // Check for company name in URL
   const hasCompanyName = urlLower.includes(companyLower);
-  
-  // Check for funding keywords
   const hasFundingKeywords = urlLower.includes("funding") || 
                              urlLower.includes("investment") || 
                              urlLower.includes("raise") || 
                              urlLower.includes("round") ||
-                             urlLower.includes("announcement") ||
-                             urlLower.includes("press-release");
+                             urlLower.includes("announcement");
 
-  // Prioritize press release domains, then company name + funding keywords
   return hasPressReleaseDomain || (hasCompanyName && hasFundingKeywords);
 }
 
-async function extractDataFromUrls(
-  urls: string[],
-  companyName: string,
-  investors: string
-): Promise<{
-  investorNames: string;
-  amountRaised: string;
+async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<{
+  investor_contacts: string;
+  amount_raised: string;
 }> {
-  let allTexts: string[] = [];
-
   console.log(`📥 Extracting content from ${urls.length} URLs...`);
 
-  for (const url of urls) {
+  let allTexts: string[] = [];
+
+  for (const url of urls.slice(0, 3)) {
     console.log(`🌐 Processing: ${url}`);
     
     try {
-      const text = await fetchArticleContentAdvanced(url);
-      if (text && text.length > 100) {
+      const text = await fetchUrlContent(url);
+      if (text && text.length > 200) {
         allTexts.push(text);
-        console.log(`✅ Extracted ${text.length} characters from ${url}`);
+        console.log(`✅ Extracted ${text.length} characters`);
       } else {
         console.log(`⚠️ Insufficient content from ${url}`);
       }
     } catch (error) {
       console.error(`❌ Failed to extract from ${url}:`, error);
     }
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Small delay between requests
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
 
   if (allTexts.length === 0) {
-    console.log("❌ No content extracted");
-    return { investorNames: "N/A", amountRaised: "N/A" };
+    console.log("❌ No content extracted from URLs");
+    return { investor_contacts: "N/A", amount_raised: "N/A" };
   }
 
-  const combinedText = allTexts.join("\n\n").slice(0, 15000);
+  const combinedText = allTexts.join("\n\n").slice(0, 12000);
   console.log(`📝 Combined text length: ${combinedText.length} characters`);
 
   // Extract data using LLM
   const [investorNames, amountRaised] = await Promise.all([
-    extractInvestorNamesWithLLM(combinedText, companyName, investors),
-    extractAmountRaisedWithLLM(combinedText, companyName),
+    extractInvestorNamesWithLLM(combinedText, record.company_name, record.investors),
+    extractAmountRaisedWithLLM(combinedText, record.company_name),
   ]);
 
-  return { investorNames, amountRaised };
+  return { 
+    investor_contacts: investorNames, 
+    amount_raised: amountRaised 
+  };
 }
 
-async function fetchArticleContentAdvanced(url: string): Promise<string> {
-  const blockedDomains = ["facebook.com", "twitter.com", "linkedin.com", "instagram.com"];
-  if (blockedDomains.some(domain => url.includes(domain))) {
-    console.log(`🚫 Skipping social media: ${url}`);
-    return "";
-  }
-
+async function fetchUrlContent(url: string): Promise<string> {
   const userAgents = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
   ];
 
@@ -284,28 +255,25 @@ async function fetchArticleContentAdvanced(url: string): Promise<string> {
       const response = await fetch(url, {
         headers: {
           "User-Agent": userAgents[attempt],
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
         redirect: "follow",
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        throw new Error(`HTTP ${response.status}`);
       }
 
       const html = await response.text();
       const text = extractTextFromHTML(html);
 
-      if (text.length > 100) {
+      if (text.length > 200) {
         return text;
       }
     } catch (error) {
       console.error(`❌ Attempt ${attempt + 1} failed:`, error);
       if (attempt < userAgents.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
   }
@@ -314,19 +282,12 @@ async function fetchArticleContentAdvanced(url: string): Promise<string> {
 }
 
 function extractTextFromHTML(html: string): string {
-  // Multiple extraction strategies
+  // Multiple content extraction strategies
   const strategies = [
-    // Strategy 1: Press release specific selectors
-    /<div[^>]*class="[^"]*press[^"]*"[^>]*>(.*?)<\/div>/gis,
-    /<div[^>]*class="[^"]*release[^"]*"[^>]*>(.*?)<\/div>/gis,
-    /<div[^>]*class="[^"]*announcement[^"]*"[^>]*>(.*?)<\/div>/gis,
-    // Strategy 2: Article content
     /<article[^>]*>(.*?)<\/article>/gis,
-    /<main[^>]*>(.*?)<\/main>/gis,
-    // Strategy 3: Content divs
     /<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)<\/div>/gis,
     /<div[^>]*class="[^"]*article[^"]*"[^>]*>(.*?)<\/div>/gis,
-    // Strategy 4: Paragraphs
+    /<main[^>]*>(.*?)<\/main>/gis,
     /<p[^>]*>(.*?)<\/p>/gis,
   ];
 
@@ -335,19 +296,11 @@ function extractTextFromHTML(html: string): string {
     const matches = html.match(pattern);
     if (matches && matches.length > 0) {
       text = matches.join(" ");
-      if (text.length > 500) break;
+      if (text.length > 1000) break;
     }
   }
 
-  // If no good content found, extract all paragraphs
-  if (text.length < 200) {
-    const paragraphs = html.match(/<p[^>]*>(.*?)<\/p>/gis);
-    if (paragraphs) {
-      text = paragraphs.join(" ");
-    }
-  }
-
-  // Clean HTML and decode entities
+  // Clean up HTML and decode entities
   text = text
     .replace(/<script[^>]*>.*?<\/script>/gis, "")
     .replace(/<style[^>]*>.*?<\/style>/gis, "")
@@ -359,7 +312,6 @@ function extractTextFromHTML(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#x27;/g, "'")
     .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -377,24 +329,24 @@ async function extractInvestorNamesWithLLM(
     return "N/A";
   }
 
-  const prompt = `You are a financial analyst extracting investor contact information from a funding announcement about ${companyName}.
+  const prompt = `You are extracting investor contact information from a funding announcement about ${companyName}.
 
-TASK: Extract the names of INDIVIDUAL PEOPLE who represent the INVESTORS/VENTURE CAPITAL FIRMS in this funding round.
+TASK: Find the INDIVIDUAL PEOPLE who represent the INVESTOR FIRMS in this funding round.
 
 REQUIREMENTS:
-- Extract FULL NAMES of individual people (not just companies)
+- Extract FULL NAMES of individual people (not companies)
 - Format as: "FirstName LastName (Firm Name)"
-- Example output: "Brayton Williams (Boost VC), Nicole Velho (Sie Ventures)"
-- Only include people who are partners, managing directors, principals, or investors at VC firms
-- Do NOT include company executives, founders, or employees of ${companyName}
-- If no individual investor names are found, return "N/A"
+- Example: "Brayton Williams (Boost VC), Nicole Velho (Sie Ventures)"
+- Only include partners, managing directors, principals at VC firms
+- Do NOT include company executives or employees of ${companyName}
+- If no individual names found, return "N/A"
 
-Known investor firms mentioned: ${knownInvestors}
+Known investor firms: ${knownInvestors}
 
 ARTICLE TEXT:
-${text.slice(0, 8000)}
+${text.slice(0, 6000)}
 
-EXTRACT INVESTOR NAMES (format: "Name (Firm)"):`;
+Return only the formatted names:`;
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -408,7 +360,7 @@ EXTRACT INVESTOR NAMES (format: "Name (Firm)"):`;
         messages: [
           {
             role: "system",
-            content: "You are a precise financial analyst who extracts investor contact names from press releases. Focus only on individual people from investor firms, formatted as 'Name (Firm)'.",
+            content: "You extract individual investor names from press releases. Format as 'Name (Firm)'. Return 'N/A' if no individual names found.",
           },
           {
             role: "user",
@@ -416,12 +368,12 @@ EXTRACT INVESTOR NAMES (format: "Name (Firm)"):`;
           },
         ],
         temperature: 0.1,
-        max_tokens: 400,
+        max_tokens: 300,
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Groq API error: ${response.status} ${response.statusText}`);
+      throw new Error(`Groq API error: ${response.status}`);
     }
 
     const data = await response.json();
@@ -429,24 +381,14 @@ EXTRACT INVESTOR NAMES (format: "Name (Firm)"):`;
 
     console.log("🤖 LLM Investor Names Result:", result);
 
-    // Clean and validate result
+    // Validate and clean result
     if (
       result.toLowerCase().includes("n/a") ||
       result.toLowerCase().includes("no individual") ||
       result.toLowerCase().includes("not found") ||
-      result.toLowerCase().includes("not mentioned") ||
       result.trim().length < 5
     ) {
       return "N/A";
-    }
-
-    // Extract names in the format "Name (Firm)"
-    const namePattern = /([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)*)\s*\(([^)]+)\)/g;
-    const matches = [...result.matchAll(namePattern)];
-    
-    if (matches.length > 0) {
-      const formattedNames = matches.map(match => `${match[1]} (${match[2]})`);
-      return formattedNames.join(", ");
     }
 
     return result.trim();
@@ -466,18 +408,18 @@ async function extractAmountRaisedWithLLM(
     return "N/A";
   }
 
-  const prompt = `Extract the funding amount raised by ${companyName} from this press release.
+  const prompt = `Extract the exact funding amount raised by ${companyName} from this press release.
 
 INSTRUCTIONS:
-- Look for funding amounts like "$5M", "$10 million", "$2.5B", "€1.2M", etc.
-- Return the amount in format like "$5M" or "$10 million"
-- If no specific amount is mentioned, return "N/A"
+- Look for funding amounts like "$5M", "$10 million", "$2.5B", etc.
+- Return the amount exactly as written (e.g., "$5M" or "$10 million")
+- If no specific amount mentioned, return "N/A"
 - Look for phrases like "raised", "funding", "investment", "round", "secured"
 
 ARTICLE TEXT:
-${text.slice(0, 8000)}
+${text.slice(0, 6000)}
 
-FUNDING AMOUNT:`;
+Return only the funding amount:`;
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -491,7 +433,7 @@ FUNDING AMOUNT:`;
         messages: [
           {
             role: "system",
-            content: "You are a financial analyst who extracts funding amounts from press releases. Be precise and only return the amount.",
+            content: "You extract funding amounts from press releases. Return only the amount or 'N/A'.",
           },
           {
             role: "user",
@@ -499,23 +441,22 @@ FUNDING AMOUNT:`;
           },
         ],
         temperature: 0.1,
-        max_tokens: 100,
+        max_tokens: 50,
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Groq API error: ${response.status} ${response.statusText}`);
+      throw new Error(`Groq API error: ${response.status}`);
     }
 
     const data = await response.json();
     const result = data.choices[0]?.message?.content || "N/A";
 
-    console.log("🤖 LLM Amount Raised Result:", result);
+    console.log("🤖 LLM Amount Result:", result);
 
     if (
       result.toLowerCase().includes("n/a") ||
       result.toLowerCase().includes("no amount") ||
-      result.toLowerCase().includes("not mentioned") ||
       result.trim().length < 2
     ) {
       return "N/A";
@@ -523,7 +464,98 @@ FUNDING AMOUNT:`;
 
     return result.trim();
   } catch (error) {
-    console.error("💥 Error extracting amount raised:", error);
+    console.error("💥 Error extracting amount:", error);
     return "N/A";
+  }
+}
+
+async function tryGPTFallback(record: FundraiseData): Promise<{
+  urls: string[];
+  investor_contacts: string;
+  amount_raised: string;
+}> {
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!openaiApiKey) {
+    console.error("❌ OPENAI_API_KEY not configured for fallback");
+    return {
+      urls: [],
+      investor_contacts: "N/A",
+      amount_raised: "N/A",
+    };
+  }
+
+  const prompt = `Find press release URLs and extract funding information for ${record.company_name}.
+
+Company: ${record.company_name}
+Known Investors: ${record.investors}
+Date Raised: ${record.date_raised}
+
+Please provide:
+1. 3 press release URLs about their funding
+2. Individual investor names in format "Name (Firm)"
+3. Amount raised
+
+Return in JSON format:
+{
+  "urls": ["url1", "url2", "url3"],
+  "investor_contacts": "Name (Firm), Name (Firm)",
+  "amount_raised": "$X million"
+}`;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "You are a research assistant. Find press releases and extract funding information. Return valid JSON only.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 500,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content || "";
+
+    console.log("🤖 GPT Fallback Result:", result);
+
+    try {
+      const parsed = JSON.parse(result);
+      return {
+        urls: parsed.urls || [],
+        investor_contacts: parsed.investor_contacts || "N/A",
+        amount_raised: parsed.amount_raised || "N/A",
+      };
+    } catch (parseError) {
+      console.error("❌ Failed to parse GPT response:", parseError);
+      return {
+        urls: [],
+        investor_contacts: "N/A",
+        amount_raised: "N/A",
+      };
+    }
+  } catch (error) {
+    console.error("💥 GPT fallback failed:", error);
+    return {
+      urls: [],
+      investor_contacts: "N/A",
+      amount_raised: "N/A",
+    };
   }
 }
