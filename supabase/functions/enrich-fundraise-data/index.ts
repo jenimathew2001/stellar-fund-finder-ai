@@ -75,7 +75,11 @@ serve(async (req) => {
   }
 });
 
-const getUrls = async (record: FundraiseData): Promise<string[]> => {
+const getUrls = async (record_arg: FundraiseData): Promise<string[]> => {
+  const record = { ...record_arg };
+
+  if (record.investors === "Not specified") record.investors = "";
+
   // Step 0 :try google search
   const urls_google = await searchFundingPressReleasesGoogle(record);
 
@@ -236,18 +240,28 @@ interface SearchResult {
   urls: string[];
 }
 
+const getPromptForGoogleSearch = (company_name, investors) => {
+  const exclude_files =
+    " -filetype:pdf -filetype:doc -filetype:docx -filetype:xls -filetype:ppt -filetype:txt -filetype:rtf";
+  const main_prompt = `${company_name} investor ${
+    investors || ""
+  } press release`;
+
+  return main_prompt + exclude_files;
+};
+
 export async function searchFundingPressReleasesGoogle(
   record: FundraiseData
 ): Promise<SearchResult> {
   const API_KEY = Deno.env.get("GOOGLE_API");
   const CX = Deno.env.get("GOOGLE_CX");
 
-  const query = `${record.company_name} funding round "investors" ${
-    record.investors || ""
-  }`;
+  const query = getPromptForGoogleSearch(record.company_name, record.investors);
   const url = `https://www.googleapis.com/customsearch/v1?key=${API_KEY}&cx=${CX}&q=${encodeURIComponent(
     query
   )}&num=5`;
+
+  console.log("Google api trying : ", query);
 
   try {
     const response = await fetch(url);
@@ -421,40 +435,36 @@ async function trySerpForRemaining(
   ];
 
   for (const query of searchQueries) {
-    try {
-      console.log(`Trying SERP query: "${query}"`);
+    console.log(`Trying SERP query: "${query}"`);
 
-      const response = await fetch(
-        `https://serpapi.com/search.json?` +
-          new URLSearchParams({
-            q: query,
-            api_key: serpApiKey,
-            hl: "en",
-            gl: "us",
-            num: count.toString(),
-          })
-      );
+    const response = await fetch(
+      `https://serpapi.com/search.json?` +
+        new URLSearchParams({
+          q: query,
+          api_key: serpApiKey,
+          hl: "en",
+          gl: "us",
+          num: count.toString(),
+        })
+    );
 
-      if (!response.ok) {
-        if (response.status === 429) {
-          throw new Error("SERP API rate limit reached");
-        }
-        throw new Error(`SERP API error: ${response.status}`);
+    if (!response.ok) {
+      if (response.status === 429) {
+        throw new Error("SERP API rate limit reached");
       }
+      throw new Error(`SERP API error: ${response.status}`);
+    }
 
-      const data = await response.json();
-      const results = data.organic_results || [];
+    const data = await response.json();
+    const results = data.organic_results || [];
 
-      // Filter out existing URLs
-      const newUrls = results
-        .map((result: any) => result.link)
-        .filter((url: string) => !existingUrls.includes(url));
+    // Filter out existing URLs
+    const newUrls = results
+      .map((result: any) => result.link)
+      .filter((url: string) => !existingUrls.includes(url));
 
-      if (newUrls.length > 0) {
-        return { urls: newUrls };
-      }
-    } catch (error) {
-      throw error; // Let the caller handle retries
+    if (newUrls.length > 0) {
+      return { urls: newUrls };
     }
   }
 
@@ -496,29 +506,10 @@ async function extractDataFromUrls(
   );
   return gptResult;
 }
-
-async function extractWithGroq(
-  urls: string[],
+const createPromptForGroq = (
+  combinedContent: string,
   record: FundraiseData
-): Promise<ExtractedData> {
-  const groqApiKey = Deno.env.get("GROQ_API_KEY");
-  if (!groqApiKey) throw new Error("No Groq API key");
-
-  const contents: string[] = [];
-  for (const url of urls) {
-    try {
-      const content = await fetchUrlContent(url);
-      if (content) contents.push(content);
-    } catch (error) {
-      continue;
-    }
-  }
-
-  if (contents.length === 0) {
-    throw new Error("No content could be extracted from URLs");
-  }
-
-  const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
+) => {
   const prompt = `Extract funding information from these articles about ${
     record.company_name
   }.
@@ -531,13 +522,27 @@ ${combinedContent}
 
 Extract:
 1. Individual investors and their roles (format: "Name (Role, Firm)")
-2. Exact funding amount with currency
+2. funding amount with currency
 
-Return in JSON format:
+
+Return in JSON format in a single line and not extra text other than the json :
 {
   "investor_contacts": "Name1 (Role, Firm1), Name2 (Role, Firm2)",
   "amount_raised": "$X million"
-}`;
+}
+  do not send 0 million as its wrong instead send {} as response; 
+  if data is not found return {}`;
+
+  return prompt;
+};
+const askGroq = async (
+  prompt: string
+): Promise<{
+  investor_contacts?: string;
+  amount_raised?: string;
+}> => {
+  const groqApiKey = Deno.env.get("GROQ_API_KEY");
+  if (!groqApiKey) throw new Error("No Groq API key");
 
   const response = await fetch(
     "https://api.groq.com/openai/v1/chat/completions",
@@ -548,12 +553,12 @@ Return in JSON format:
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "mixtral-8x7b-32768",
+        model: "llama3-8b-8192",
         messages: [
           {
             role: "system",
             content:
-              "You are an expert at extracting precise funding information from press releases.",
+              "You are an expert at extracting precise funding information from press releases and only response in json.",
           },
           {
             role: "user",
@@ -567,64 +572,58 @@ Return in JSON format:
   );
 
   if (!response.ok) {
+    console.log(response.status, " groq response", await response.json());
     if (response.status === 429) throw new Error("Rate limit");
     throw new Error(`Groq API error: ${response.status}`);
   }
 
   const data = await response.json();
-  const result = JSON.parse(data.choices[0]?.message?.content || "{}");
+  console.log("data", data);
+  try {
+    console.log("ai response ", data.choices[0]?.message?.content);
+    const result = JSON.parse(data.choices[0]?.message?.content || "{}");
+    return {
+      investor_contacts: result.investor_contacts || "",
+      amount_raised: result.amount_raised || "",
+    };
+  } catch (e) {
+    //
+  }
 
-  return {
-    investor_contacts: result.investor_contacts || "N/A",
-    amount_raised: result.amount_raised || "N/A",
-    urls: urls,
-  };
-}
+  return {};
+};
 
-async function extractWithGPT4(
+async function extractWithGroq(
   urls: string[],
   record: FundraiseData
 ): Promise<ExtractedData> {
-  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-  if (!openaiApiKey) {
-    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
-  }
-
-  const contents: string[] = [];
   for (const url of urls) {
+    console.log("trying with : ", url);
     try {
       const content = await fetchUrlContent(url);
-      if (content) contents.push(content);
+      console.log("Got content from ", content);
+      if (content) {
+        const prompt = await createPromptForGroq(content, record);
+        const response = await askGroq(prompt);
+        if (response.amount_raised && response.investor_contacts)
+          return {
+            amount_raised: response.amount_raised || "N/A",
+            investor_contacts: response.investor_contacts || "N/A",
+            urls: urls,
+          };
+      }
     } catch (error) {
       continue;
     }
   }
 
-  if (contents.length === 0) {
-    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
+  throw new Error("No content could be extracted from URLs");
+}
+const askOpenAi = async (prompt: string) => {
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!openaiApiKey) {
+    return { investor_contacts: "N/A", amount_raised: "N/A" };
   }
-
-  const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
-  const prompt = `Extract funding information from these articles about ${
-    record.company_name
-  }.
-
-Company: ${record.company_name}
-Known Investors: ${record.investors || "Unknown"}
-
-Content:
-${combinedContent}
-
-Extract:
-1. Individual investors and their roles (format: "Name (Role, Firm)")
-2. Exact funding amount with currency
-
-Return in JSON format:
-{
-  "investor_contacts": "Name1 (Role, Firm1), Name2 (Role, Firm2)",
-  "amount_raised": "$X million"
-}`;
-
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -638,7 +637,7 @@ Return in JSON format:
           {
             role: "system",
             content:
-              "You are an expert at extracting precise funding information from press releases.",
+              "You are an expert at extracting precise funding information from press releases. and only response in json",
           },
           {
             role: "user",
@@ -660,12 +659,38 @@ Return in JSON format:
     return {
       investor_contacts: result.investor_contacts || "N/A",
       amount_raised: result.amount_raised || "N/A",
-      urls: urls,
     };
   } catch (error) {
     console.error("❌ GPT-4 extraction failed:", error);
-    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
+    return { investor_contacts: "N/A", amount_raised: "N/A" };
   }
+};
+
+async function extractWithGPT4(
+  urls: string[],
+  record: FundraiseData
+): Promise<ExtractedData> {
+  for (const url of urls) {
+    console.log("trying with : ", url);
+    try {
+      const content = await fetchUrlContent(url);
+      console.log("Got content from ", content);
+      if (content) {
+        const prompt = await createPromptForGroq(content, record);
+        const response = await askOpenAi(prompt);
+        if (response.amount_raised && response.investor_contacts)
+          return {
+            amount_raised: response.amount_raised || "N/A",
+            investor_contacts: response.investor_contacts || "N/A",
+            urls: urls,
+          };
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
 }
 
 async function fetchUrlContent(url: string): Promise<string> {
