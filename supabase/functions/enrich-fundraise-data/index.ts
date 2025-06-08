@@ -100,21 +100,19 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   }
 
   try {
-    // Format date if available
-    let dateStr = "";
-    if (record.date_raised && record.date_raised !== "Not specified") {
-      const date = new Date(record.date_raised);
-      if (!isNaN(date.getTime())) {
-        dateStr = date.getFullYear().toString();
-      }
-    }
+    // Construct the simple query just like the Python version
+    const query = `${record.company_name} funding press release ${record.date_raised}`;
+    console.log(`🔍 Search query: "${query}"`);
 
-    // Construct a simple, direct query
-    const query = `${record.company_name} funding press release ${dateStr}`.trim();
-    console.log(`🔍 Searching with query: "${query}"`);
-
+    // Make the API call with the same parameters as the Python version
     const response = await fetch(
-      `https://serpapi.com/search?q=${encodeURIComponent(query)}&api_key=${serpApiKey}&num=10&engine=google&hl=en&gl=us`
+      `https://serpapi.com/search.json?` + new URLSearchParams({
+        q: query,
+        api_key: serpApiKey,
+        hl: "en",
+        gl: "us",
+        num: "10"
+      })
     );
 
     if (!response.ok) {
@@ -124,38 +122,30 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     const data = await response.json();
     const organicResults = data.organic_results || [];
     
-    console.log(`📊 Found ${organicResults.length} results`);
+    console.log(`📊 Found ${organicResults.length} organic results`);
 
-    // Filter for press release URLs
-    const pressReleaseDomains = [
-      "businesswire.com",
-      "prnewswire.com", 
-      "globenewswire.com",
-      "techcrunch.com",
-      "venturebeat.com",
-      "reuters.com",
-      "bloomberg.com",
-      "yahoo.com/finance",
-      "benzinga.com",
-    ];
+    // Take the first 3 URLs directly from organic results, just like Python version
+    let urls = organicResults
+      .slice(0, 3)
+      .map((result: any) => result.link);
 
-    const urls = organicResults
-      .filter((result: any) => {
-        const url = result.link.toLowerCase();
-        return pressReleaseDomains.some(domain => url.includes(domain));
-      })
-      .map((result: any) => result.link)
-      .slice(0, 3);
+    // Pad with "N/A" if we have fewer than 3 results
+    while (urls.length < 3) {
+      urls.push("N/A");
+    }
 
-    console.log(`✅ Found press release URLs:`, urls);
+    console.log(`✅ Press release URLs:`, urls);
     
     return {
-      success: urls.length > 0,
+      success: urls.some(url => url !== "N/A"),
       urls: urls
     };
   } catch (error) {
     console.error("❌ SERP search failed:", error);
-    return {success: false, urls: []};
+    return {
+      success: false,
+      urls: ["N/A", "N/A", "N/A"]
+    };
   }
 }
 
