@@ -75,29 +75,22 @@ serve(async (req) => {
   }
 });
 
-/**
- * Main function to enrich fundraise data. The process follows these steps:
- * 1. Try GPT-4 first to get URLs, amount, and investor info
- * 2. Validate GPT-4 provided URLs by checking content
- * 3. If needed, use SERP to find additional URLs
- * 4. Extract and verify information from valid URLs
- * 5. Final GPT-4 attempt if any information is missing
- */
-async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
-  console.log(`\n📋 Processing: ${record.company_name}`);
-  console.log("----------------------------------------");
-  
+const getUrls = async (record: FundraiseData): Promise<string[]> => {
+  // Step 0 :try google search
+  const urls_google = await searchFundingPressReleasesGoogle(record);
+
+  if (urls_google.urls.length >= 3) return urls_google.urls;
+
   // Step 1: Get initial URLs from GPT-4
   console.log("\n🤖 STEP 1: Getting URLs from GPT-4");
   console.log("----------------------------------------");
   const gptResult = await tryGPT4Initial(record);
   console.log(`Found ${gptResult.urls.length} URLs from GPT-4`);
-  
   // Step 2: Validate each URL from GPT-4
   console.log("\n🔍 STEP 2: Validating GPT-4 URLs");
   console.log("----------------------------------------");
   const validUrls: string[] = [];
-  
+
   for (const url of gptResult.urls) {
     console.log(`\nChecking URL: ${url}`);
     const isValid = await validateSingleUrl(url, record.company_name);
@@ -108,7 +101,9 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
       console.log("❌ URL is invalid or irrelevant");
     }
   }
-  console.log(`\nValidation summary: ${validUrls.length}/${gptResult.urls.length} URLs valid`);
+  console.log(
+    `\nValidation summary: ${validUrls.length}/${gptResult.urls.length} URLs valid`
+  );
 
   let finalUrls = validUrls;
 
@@ -118,20 +113,26 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
     console.log("----------------------------------------");
     const neededUrls = 3 - validUrls.length;
     console.log(`Need ${neededUrls} more valid URLs`);
-    
-    let serpUrls: string[] = [];
+
+    const serpUrls: string[] = [];
     let retryCount = 0;
     const maxRetries = 3;
 
     while (serpUrls.length < neededUrls && retryCount < maxRetries) {
       try {
-        const serpResult = await trySerpForRemaining(record, neededUrls * 2, validUrls);
-        console.log(`Found ${serpResult.urls.length} URLs from SERP, validating...`);
-        
+        const serpResult = await trySerpForRemaining(
+          record,
+          neededUrls * 2,
+          validUrls
+        );
+        console.log(
+          `Found ${serpResult.urls.length} URLs from SERP, validating...`
+        );
+
         // Validate each SERP URL
         for (const url of serpResult.urls) {
           if (serpUrls.length >= neededUrls) break;
-          
+
           console.log(`\nChecking SERP URL: ${url}`);
           const isValid = await validateSingleUrl(url, record.company_name);
           if (isValid && !validUrls.includes(url) && !serpUrls.includes(url)) {
@@ -144,23 +145,51 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
 
         if (serpUrls.length >= neededUrls) break;
         retryCount++;
-        
+
         if (retryCount < maxRetries) {
-          console.log(`\nNeed ${neededUrls - serpUrls.length} more URLs, retrying SERP (attempt ${retryCount + 1}/${maxRetries})...`);
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s between retries
+          console.log(
+            `\nNeed ${
+              neededUrls - serpUrls.length
+            } more URLs, retrying SERP (attempt ${
+              retryCount + 1
+            }/${maxRetries})...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2s between retries
         }
       } catch (error) {
         console.error(`SERP attempt ${retryCount + 1} failed:`, error);
         retryCount++;
         if (retryCount < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       }
     }
 
     finalUrls = [...validUrls, ...serpUrls];
-    console.log(`\nSERP summary: Found ${serpUrls.length} additional valid URLs`);
+    console.log(
+      `\nSERP summary: Found ${serpUrls.length} additional valid URLs`
+    );
+
+    return finalUrls;
   }
+  return [];
+};
+
+/**
+ * Main function to enrich fundraise data. The process follows these steps:
+ * 1. Try GPT-4 first to get URLs, amount, and investor info
+ * 2. Validate GPT-4 provided URLs by checking content
+ * 3. If needed, use SERP to find additional URLs
+ * 4. Extract and verify information from valid URLs
+ * 5. Final GPT-4 attempt if any information is missing
+ */
+async function enrichRecordData(
+  record: FundraiseData
+): Promise<Partial<FundraiseData>> {
+  console.log(`\n📋 Processing: ${record.company_name}`);
+  console.log("----------------------------------------");
+
+  const finalUrls = await getUrls(record);
 
   // Step 4: Extract information from valid URLs
   if (finalUrls.length === 3) {
@@ -168,19 +197,19 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
     console.log("----------------------------------------");
     console.log("Processing URLs:");
     finalUrls.forEach((url, index) => console.log(`${index + 1}. ${url}`));
-    
+
     const extractedData = await extractDataFromUrls(finalUrls, record);
-    
+
     console.log("\nExtraction Results:");
     console.log(`Amount Raised: ${extractedData.amount_raised}`);
     console.log(`Investor Contacts: ${extractedData.investor_contacts}`);
-    
+
     return {
       press_url_1: finalUrls[0],
       press_url_2: finalUrls[1],
       press_url_3: finalUrls[2],
       investor_contacts: extractedData.investor_contacts,
-      amount_raised: extractedData.amount_raised
+      amount_raised: extractedData.amount_raised,
     };
   }
 
@@ -188,14 +217,54 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
   console.log("\n⚠️ Could not find 3 valid URLs");
   console.log("----------------------------------------");
   console.log(`Total valid URLs found: ${finalUrls.length}`);
-  
+
   return {
     press_url_1: finalUrls[0] || "N/A",
     press_url_2: finalUrls[1] || "N/A",
     press_url_3: finalUrls[2] || "N/A",
     investor_contacts: "N/A",
-    amount_raised: "N/A"
+    amount_raised: "N/A",
   };
+}
+
+interface PressSearchOptions {
+  companyName: string;
+  investors?: string;
+}
+
+interface SearchResult {
+  urls: string[];
+}
+
+export async function searchFundingPressReleasesGoogle(
+  record: FundraiseData
+): Promise<SearchResult> {
+  const API_KEY = Deno.env.get("GOOGLE_API");
+  const CX = Deno.env.get("GOOGLE_CX");
+
+  const query = `${record.company_name} funding round investors ${
+    record.investors || ""
+  }`;
+  const url = `https://www.googleapis.com/customsearch/v1?key=${API_KEY}&cx=${CX}&q=${encodeURIComponent(
+    query
+  )}&num=5`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    const urls: string[] =
+      data.items?.map((item: any) => item.link).slice(0, 3) || [];
+
+    return { urls };
+  } catch (error) {
+    console.error("Error fetching press releases:", error);
+    return { urls: [] };
+  }
 }
 
 /**
@@ -213,11 +282,13 @@ async function tryGPT4Initial(record: FundraiseData): Promise<{
     return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
   }
 
-  const prompt = `Find press release URLs for ${record.company_name}'s funding round.
+  const prompt = `Find press release URLs for ${
+    record.company_name
+  }'s funding round.
 
 Company: ${record.company_name}
-Date: ${record.date_raised || 'Recent'}
-Known Investors: ${record.investors || 'Unknown'}
+Date: ${record.date_raised || "Recent"}
+Known Investors: ${record.investors || "Unknown"}
 
 Task:
 Find 3 most relevant press release URLs about this funding round.
@@ -242,7 +313,8 @@ Return in JSON format:
         messages: [
           {
             role: "system",
-            content: "You are an expert in finding accurate press releases about startup funding rounds."
+            content:
+              "You are an expert in finding accurate press releases about startup funding rounds.",
           },
           {
             role: "user",
@@ -260,11 +332,11 @@ Return in JSON format:
 
     const data = await response.json();
     const result = JSON.parse(data.choices[0]?.message?.content || "{}");
-    
+
     return {
       urls: result.urls || [],
       investor_contacts: "N/A", // We'll get this from URL content later
-      amount_raised: "N/A" // We'll get this from URL content later
+      amount_raised: "N/A", // We'll get this from URL content later
     };
   } catch (error) {
     console.error("❌ GPT-4 URL search failed:", error);
@@ -275,30 +347,41 @@ Return in JSON format:
 /**
  * Validates a single URL by checking its content
  */
-async function validateSingleUrl(url: string, companyName: string): Promise<boolean> {
+async function validateSingleUrl(
+  url: string,
+  companyName: string
+): Promise<boolean> {
   try {
     const content = await fetchUrlContent(url);
     if (!content) return false;
 
     const companyNameLower = companyName.toLowerCase();
     const contentLower = content.toLowerCase();
-    
+
     // Must contain company name
     if (!contentLower.includes(companyNameLower)) {
-      console.log('Company name not found in content');
+      console.log("Company name not found in content");
       return false;
     }
 
     // Must contain funding keywords
-    const fundingKeywords = ['funding', 'investment', 'raises', 'raised', 'round', 'capital'];
-    const foundKeywords = fundingKeywords.filter(keyword => 
+    const fundingKeywords = [
+      "funding",
+      "investment",
+      "raises",
+      "raised",
+      "round",
+      "capital",
+    ];
+    const foundKeywords = fundingKeywords.filter((keyword) =>
       contentLower.includes(keyword.toLowerCase())
     );
 
     // Calculate relevance score
     let score = foundKeywords.length;
-    if (url.includes('press-release') || url.includes('news')) score += 1;
-    if (/businesswire\.com|prnewswire\.com|globenewswire\.com/.test(url)) score += 2;
+    if (url.includes("press-release") || url.includes("news")) score += 1;
+    if (/businesswire\.com|prnewswire\.com|globenewswire\.com/.test(url))
+      score += 2;
     if (/techcrunch\.com|reuters\.com|bloomberg\.com/.test(url)) score += 1;
 
     const isValid = score >= 2;
@@ -307,7 +390,10 @@ async function validateSingleUrl(url: string, companyName: string): Promise<bool
     }
     return isValid;
   } catch (error) {
-    console.log('Error fetching or processing URL:', error instanceof Error ? error.message : 'Unknown error');
+    console.log(
+      "Error fetching or processing URL:",
+      error instanceof Error ? error.message : "Unknown error"
+    );
     return false;
   }
 }
@@ -317,10 +403,10 @@ async function validateSingleUrl(url: string, companyName: string): Promise<bool
  * Focuses on press releases and tech news sites.
  */
 async function trySerpForRemaining(
-  record: FundraiseData, 
-  count: number, 
+  record: FundraiseData,
+  count: number,
   existingUrls: string[]
-): Promise<{urls: string[]}> {
+): Promise<{ urls: string[] }> {
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) {
     throw new Error("SERP_API_KEY not configured");
@@ -330,7 +416,7 @@ async function trySerpForRemaining(
   const searchQueries = [
     `"${record.company_name}" funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`,
     `"${record.company_name}" raises funding ${record.date_raised}`,
-    `"${record.company_name}" investment announcement ${record.date_raised} site:techcrunch.com OR site:reuters.com`
+    `"${record.company_name}" investment announcement ${record.date_raised} site:techcrunch.com OR site:reuters.com`,
   ];
 
   for (const query of searchQueries) {
@@ -338,13 +424,14 @@ async function trySerpForRemaining(
       console.log(`Trying SERP query: "${query}"`);
 
       const response = await fetch(
-        `https://serpapi.com/search.json?` + new URLSearchParams({
-          q: query,
-          api_key: serpApiKey,
-          hl: "en",
-          gl: "us",
-          num: count.toString()
-        })
+        `https://serpapi.com/search.json?` +
+          new URLSearchParams({
+            q: query,
+            api_key: serpApiKey,
+            hl: "en",
+            gl: "us",
+            num: count.toString(),
+          })
       );
 
       if (!response.ok) {
@@ -356,12 +443,12 @@ async function trySerpForRemaining(
 
       const data = await response.json();
       const results = data.organic_results || [];
-      
+
       // Filter out existing URLs
       const newUrls = results
         .map((result: any) => result.link)
         .filter((url: string) => !existingUrls.includes(url));
-      
+
       if (newUrls.length > 0) {
         return { urls: newUrls };
       }
@@ -376,14 +463,20 @@ async function trySerpForRemaining(
 /**
  * Update extractDataFromUrls to be more concise
  */
-async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+async function extractDataFromUrls(
+  urls: string[],
+  record: FundraiseData
+): Promise<ExtractedData> {
   console.log("\nAttempting data extraction...");
-  
+
   // First try with Groq
   try {
     console.log("Trying extraction with Groq...");
     const groqResult = await extractWithGroq(urls, record);
-    if (groqResult.investor_contacts !== "N/A" && groqResult.amount_raised !== "N/A") {
+    if (
+      groqResult.investor_contacts !== "N/A" &&
+      groqResult.amount_raised !== "N/A"
+    ) {
       console.log("✅ Groq extraction successful");
       return groqResult;
     }
@@ -395,13 +488,18 @@ async function extractDataFromUrls(urls: string[], record: FundraiseData): Promi
   // Fallback to GPT-4
   console.log("Trying extraction with GPT-4...");
   const gptResult = await extractWithGPT4(urls, record);
-  console.log(gptResult.investor_contacts === "N/A" || gptResult.amount_raised === "N/A" 
-    ? "⚠️ GPT-4 extraction incomplete" 
-    : "✅ GPT-4 extraction successful");
+  console.log(
+    gptResult.investor_contacts === "N/A" || gptResult.amount_raised === "N/A"
+      ? "⚠️ GPT-4 extraction incomplete"
+      : "✅ GPT-4 extraction successful"
+  );
   return gptResult;
 }
 
-async function extractWithGroq(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+async function extractWithGroq(
+  urls: string[],
+  record: FundraiseData
+): Promise<ExtractedData> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
   if (!groqApiKey) throw new Error("No Groq API key");
 
@@ -420,10 +518,12 @@ async function extractWithGroq(urls: string[], record: FundraiseData): Promise<E
   }
 
   const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
-  const prompt = `Extract funding information from these articles about ${record.company_name}.
+  const prompt = `Extract funding information from these articles about ${
+    record.company_name
+  }.
 
 Company: ${record.company_name}
-Known Investors: ${record.investors || 'Unknown'}
+Known Investors: ${record.investors || "Unknown"}
 
 Content:
 ${combinedContent}
@@ -438,28 +538,32 @@ Return in JSON format:
   "amount_raised": "$X million"
 }`;
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${groqApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "mixtral-8x7b-32768",
-      messages: [
-        {
-          role: "system",
-          content: "You are an expert at extracting precise funding information from press releases."
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 500,
-    }),
-  });
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "mixtral-8x7b-32768",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an expert at extracting precise funding information from press releases.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 500,
+      }),
+    }
+  );
 
   if (!response.ok) {
     if (response.status === 429) throw new Error("Rate limit");
@@ -472,11 +576,14 @@ Return in JSON format:
   return {
     investor_contacts: result.investor_contacts || "N/A",
     amount_raised: result.amount_raised || "N/A",
-    urls: urls
+    urls: urls,
   };
 }
 
-async function extractWithGPT4(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+async function extractWithGPT4(
+  urls: string[],
+  record: FundraiseData
+): Promise<ExtractedData> {
   const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
   if (!openaiApiKey) {
     return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
@@ -497,10 +604,12 @@ async function extractWithGPT4(urls: string[], record: FundraiseData): Promise<E
   }
 
   const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
-  const prompt = `Extract funding information from these articles about ${record.company_name}.
+  const prompt = `Extract funding information from these articles about ${
+    record.company_name
+  }.
 
 Company: ${record.company_name}
-Known Investors: ${record.investors || 'Unknown'}
+Known Investors: ${record.investors || "Unknown"}
 
 Content:
 ${combinedContent}
@@ -527,7 +636,8 @@ Return in JSON format:
         messages: [
           {
             role: "system",
-            content: "You are an expert at extracting precise funding information from press releases."
+            content:
+              "You are an expert at extracting precise funding information from press releases.",
           },
           {
             role: "user",
@@ -549,7 +659,7 @@ Return in JSON format:
     return {
       investor_contacts: result.investor_contacts || "N/A",
       amount_raised: result.amount_raised || "N/A",
-      urls: urls
+      urls: urls,
     };
   } catch (error) {
     console.error("❌ GPT-4 extraction failed:", error);
@@ -570,7 +680,8 @@ async function fetchUrlContent(url: string): Promise<string> {
       const response = await fetch(url, {
         headers: {
           "User-Agent": userAgents[attempt],
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
         redirect: "follow",
       });
@@ -588,7 +699,7 @@ async function fetchUrlContent(url: string): Promise<string> {
     } catch (error) {
       console.error(`❌ Attempt ${attempt + 1} failed:`, error);
       if (attempt < userAgents.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
   }
@@ -640,7 +751,7 @@ async function extractInvestorNamesWithLLM(
 ): Promise<string> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
   const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-  
+
   if (!groqApiKey && !openaiApiKey) {
     console.error("❌ Neither GROQ_API_KEY nor OPENAI_API_KEY configured");
     return "N/A";
@@ -652,7 +763,12 @@ async function extractInvestorNamesWithLLM(
   // 1. Try Groq first if available
   if (groqApiKey) {
     try {
-      result = await tryGroqExtraction(text, companyName, knownInvestors, groqApiKey);
+      result = await tryGroqExtraction(
+        text,
+        companyName,
+        knownInvestors,
+        groqApiKey
+      );
       if (result !== "N/A") {
         console.log("✅ Successfully extracted investors using Groq");
         return result;
@@ -669,7 +785,12 @@ async function extractInvestorNamesWithLLM(
   // 2. Try OpenAI if available
   if (openaiApiKey) {
     try {
-      result = await tryOpenAIExtraction(text, companyName, knownInvestors, openaiApiKey);
+      result = await tryOpenAIExtraction(
+        text,
+        companyName,
+        knownInvestors,
+        openaiApiKey
+      );
       if (result !== "N/A") {
         console.log("✅ Successfully extracted investors using OpenAI");
         return result;
@@ -682,7 +803,11 @@ async function extractInvestorNamesWithLLM(
   // 3. If still no results, try direct investor lookup
   if (openaiApiKey && knownInvestors) {
     try {
-      result = await tryInvestorLookup(companyName, knownInvestors, openaiApiKey);
+      result = await tryInvestorLookup(
+        companyName,
+        knownInvestors,
+        openaiApiKey
+      );
       if (result !== "N/A") {
         console.log("✅ Successfully found investors through direct lookup");
         return result;
@@ -724,10 +849,12 @@ ${text.slice(0, 6000)}
 
 Return ONLY the formatted investor names:`;
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
       method: "POST",
       headers: {
-      Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -735,7 +862,8 @@ Return ONLY the formatted investor names:`;
         messages: [
           {
             role: "system",
-          content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
+            content:
+              "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'.",
           },
           {
             role: "user",
@@ -745,29 +873,30 @@ Return ONLY the formatted investor names:`;
         temperature: 0.1,
         max_tokens: 300,
       }),
-    });
+    }
+  );
 
-    if (!response.ok) {
+  if (!response.ok) {
     if (response.status === 429) {
       throw new Error("Rate limit");
     }
-      throw new Error(`Groq API error: ${response.status}`);
-    }
+    throw new Error(`Groq API error: ${response.status}`);
+  }
 
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content || "N/A";
+  const data = await response.json();
+  const result = data.choices[0]?.message?.content || "N/A";
 
-    if (
-      result.toLowerCase().includes("n/a") ||
-      result.toLowerCase().includes("no individual") ||
-      result.toLowerCase().includes("not found") ||
+  if (
+    result.toLowerCase().includes("n/a") ||
+    result.toLowerCase().includes("no individual") ||
+    result.toLowerCase().includes("not found") ||
     !result.includes("(") ||
-      result.trim().length < 5
-    ) {
-      return "N/A";
-    }
+    result.trim().length < 5
+  ) {
+    return "N/A";
+  }
 
-    return result.trim();
+  return result.trim();
 }
 
 async function tryOpenAIExtraction(
@@ -800,34 +929,35 @@ ${text.slice(0, 6000)}
 Return ONLY the formatted investor names:`;
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
+    method: "POST",
+    headers: {
       Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
       model: "gpt-3.5-turbo",
-        messages: [
-          {
-            role: "system",
-          content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: 0.1,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
       max_tokens: 300,
-      }),
-    });
+    }),
+  });
 
-    if (!response.ok) {
+  if (!response.ok) {
     throw new Error(`OpenAI API error: ${response.status}`);
-    }
+  }
 
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content || "N/A";
+  const data = await response.json();
+  const result = data.choices[0]?.message?.content || "N/A";
 
   if (
     result.toLowerCase().includes("n/a") ||
@@ -875,7 +1005,8 @@ Return ONLY the formatted names, or "N/A" if no confident matches:`;
       messages: [
         {
           role: "system",
-          content: "You are an expert in venture capital and startup investments. Return only properly formatted investor names or 'N/A'."
+          content:
+            "You are an expert in venture capital and startup investments. Return only properly formatted investor names or 'N/A'.",
         },
         {
           role: "user",
@@ -894,23 +1025,26 @@ Return ONLY the formatted names, or "N/A" if no confident matches:`;
   const data = await response.json();
   const result = data.choices[0]?.message?.content || "N/A";
 
-    if (
-      result.toLowerCase().includes("n/a") ||
+  if (
+    result.toLowerCase().includes("n/a") ||
     result.toLowerCase().includes("no individual") ||
     result.toLowerCase().includes("not found") ||
     !result.includes("(") ||
     result.trim().length < 5
-    ) {
-      return "N/A";
-    }
+  ) {
+    return "N/A";
+  }
 
-    return result.trim();
+  return result.trim();
 }
 
-async function extractAmountWithLLM(content: string, companyName: string): Promise<string> {
+async function extractAmountWithLLM(
+  content: string,
+  companyName: string
+): Promise<string> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
   const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-  
+
   if (!groqApiKey && !openaiApiKey) {
     console.error("❌ Neither GROQ_API_KEY nor OPENAI_API_KEY configured");
     return "N/A";
@@ -933,25 +1067,28 @@ Return ONLY the amount, nothing else.`;
 
   // Try Groq first if available
   if (groqApiKey) {
-  try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-          "Authorization": `Bearer ${groqApiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "mixtral-8x7b-32768",
-          messages: [
-            {
-              role: "user",
-              content: prompt
-            }
-          ],
-          temperature: 0.1,
-          max_tokens: 50
-        })
-      });
+    try {
+      const response = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${groqApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "mixtral-8x7b-32768",
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.1,
+            max_tokens: 50,
+          }),
+        }
+      );
 
       if (!response.ok) {
         if (response.status === 429) {
@@ -964,50 +1101,60 @@ Return ONLY the amount, nothing else.`;
       const data = await response.json();
       const amount = data.choices[0].message.content.trim();
       return amount === "N/A" ? "N/A" : amount;
-  } catch (error) {
+    } catch (error) {
       // If it's not a rate limit error and we don't have OpenAI as fallback, return N/A
       if (error.message !== "Rate limit" || !openaiApiKey) {
-        console.error("❌ Error extracting amount:", error instanceof Error ? error.message : 'Unknown error');
-    return "N/A";
-  }
+        console.error(
+          "❌ Error extracting amount:",
+          error instanceof Error ? error.message : "Unknown error"
+        );
+        return "N/A";
+      }
     }
   }
 
   // OpenAI fallback
   if (openaiApiKey) {
     try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-          model: "gpt-3.5-turbo",
-        messages: [
-          {
-            role: "system",
-              content: "You are a precise extractor of funding amounts from press releases. Return only the amount or 'N/A'."
+      const response = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${openaiApiKey}`,
+            "Content-Type": "application/json",
           },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: 0.1,
-        max_tokens: 50,
-      }),
-    });
+          body: JSON.stringify({
+            model: "gpt-3.5-turbo",
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are a precise extractor of funding amounts from press releases. Return only the amount or 'N/A'.",
+              },
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.1,
+            max_tokens: 50,
+          }),
+        }
+      );
 
-    if (!response.ok) {
+      if (!response.ok) {
         throw new Error(`OpenAI API error: ${response.status}`);
-    }
+      }
 
-    const data = await response.json();
+      const data = await response.json();
       const amount = data.choices[0].message.content.trim();
       return amount === "N/A" ? "N/A" : amount;
     } catch (error) {
-      console.error("❌ Error extracting amount with OpenAI:", error instanceof Error ? error.message : 'Unknown error');
+      console.error(
+        "❌ Error extracting amount with OpenAI:",
+        error instanceof Error ? error.message : "Unknown error"
+      );
       return "N/A";
     }
   }
@@ -1060,7 +1207,8 @@ Return in JSON format:
         messages: [
           {
             role: "system",
-            content: "You are a research assistant. Find press releases and extract funding information. Return valid JSON only.",
+            content:
+              "You are a research assistant. Find press releases and extract funding information. Return valid JSON only.",
           },
           {
             role: "user",
@@ -1106,85 +1254,95 @@ Return in JSON format:
   }
 }
 
-async function tryAlternativeSearchQueries(record: FundraiseData): Promise<string[]> {
+async function tryAlternativeSearchQueries(
+  record: FundraiseData
+): Promise<string[]> {
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) return [];
 
   // Alternative search queries to try
   const queries = [
     `${record.company_name} announces ${record.amount_raised} funding`,
-    `${record.company_name} secures investment ${record.investors || ''}`,
+    `${record.company_name} secures investment ${record.investors || ""}`,
     `${record.company_name} investment news ${record.date_raised}`,
     `${record.company_name} financing round announcement`,
-    `${record.company_name} raises capital press release`
+    `${record.company_name} raises capital press release`,
   ];
 
   console.log("\n🔄 Trying alternative search queries...");
-  
+
   const allUrls: AnalyzedUrl[] = [];
-  
+
   for (const query of queries) {
     try {
       console.log(`\n🔍 Trying query: "${query}"`);
-      
+
       const response = await fetch(
-        `https://serpapi.com/search.json?` + new URLSearchParams({
-          q: query,
-          api_key: serpApiKey,
-          hl: "en",
-          gl: "us",
-          num: "5"
-        })
+        `https://serpapi.com/search.json?` +
+          new URLSearchParams({
+            q: query,
+            api_key: serpApiKey,
+            hl: "en",
+            gl: "us",
+            num: "5",
+          })
       );
 
       if (!response.ok) continue;
 
       const data = await response.json();
       const results = data.organic_results || [];
-      
+
       for (const result of results) {
         const url = result.link;
         const content = await fetchUrlContent(url);
-        
+
         if (!content) continue;
-        
+
         // Check for company name and funding keywords
         const companyNameLower = record.company_name.toLowerCase();
         const contentLower = content.toLowerCase();
-        
+
         if (!contentLower.includes(companyNameLower)) continue;
-        
-        const foundKeywords = fundingKeywords.filter(keyword => 
+
+        const foundKeywords = fundingKeywords.filter((keyword) =>
           contentLower.includes(keyword.toLowerCase())
         );
 
-        if (foundKeywords.length >= 2) { // More lenient keyword requirement for fallback
+        if (foundKeywords.length >= 2) {
+          // More lenient keyword requirement for fallback
           allUrls.push({
             url,
             keywordCount: foundKeywords.length,
-            keywords: foundKeywords
+            keywords: foundKeywords,
           });
         }
       }
     } catch (error) {
-      console.log(`  ⚠️ Error with query "${query}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.log(
+        `  ⚠️ Error with query "${query}": ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
       continue;
     }
   }
 
   // Remove duplicates and sort by keyword count
-  const uniqueUrls = Array.from(new Set(allUrls.map(item => item.url)))
-    .map(url => allUrls.find(item => item.url === url)!)
+  const uniqueUrls = Array.from(new Set(allUrls.map((item) => item.url)))
+    .map((url) => allUrls.find((item) => item.url === url)!)
     .sort((a, b) => b.keywordCount - a.keywordCount)
-    .map(item => item.url);
+    .map((item) => item.url);
 
-  console.log(`\n📊 Found ${uniqueUrls.length} additional URLs from alternative queries`);
+  console.log(
+    `\n📊 Found ${uniqueUrls.length} additional URLs from alternative queries`
+  );
   return uniqueUrls;
 }
 
 async function tryNewsAPIs(record: FundraiseData): Promise<string[]> {
   console.log("\n📰 Trying news API sources...");
-  
+
   // This is where you could integrate with other news APIs
   // For now, we'll use a simple web search with news-specific terms
   const serpApiKey = Deno.env.get("SERP_API_KEY");
@@ -1192,15 +1350,16 @@ async function tryNewsAPIs(record: FundraiseData): Promise<string[]> {
 
   try {
     const query = `${record.company_name} funding news site:techcrunch.com OR site:bloomberg.com OR site:reuters.com OR site:businesswire.com OR site:prnewswire.com`;
-    
+
     const response = await fetch(
-      `https://serpapi.com/search.json?` + new URLSearchParams({
-        q: query,
-        api_key: serpApiKey,
-        hl: "en",
-        gl: "us",
-        num: "5"
-      })
+      `https://serpapi.com/search.json?` +
+        new URLSearchParams({
+          q: query,
+          api_key: serpApiKey,
+          hl: "en",
+          gl: "us",
+          num: "5",
+        })
     );
 
     if (!response.ok) return [];
@@ -1217,10 +1376,10 @@ async function tryNewsAPIs(record: FundraiseData): Promise<string[]> {
 
 // Common keywords to look for in content
 const fundingKeywords = [
-  'raised',
-  'funding',
-  'investment',
-  'investors',
-  'funded',
-  'fundraised'
+  "raised",
+  "funding",
+  "investment",
+  "investors",
+  "funded",
+  "fundraised",
 ];
