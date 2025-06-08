@@ -530,7 +530,7 @@ Return in JSON format in a single line and not extra text other than the json :
   "investor_contacts": "Name1 (Role, Firm1), Name2 (Role, Firm2)",
   "amount_raised": "$X million"
 }
-  do not send 0 million as its wrong instead send {} as response; 
+  do not send 0 million as its wrong instead send N/A as response in amount raised; 
   if data is not found return {}`;
 
   return prompt;
@@ -693,26 +693,61 @@ async function extractWithGPT4(
   return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
 }
 
-async function fetchUrlContent(url: string): Promise<string> {
+export async function fetchUrlContent(url: string): Promise<string> {
   const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
   ];
 
-  for (let attempt = 0; attempt < userAgents.length; attempt++) {
-    try {
-      console.log(`🔄 Attempt ${attempt + 1} for ${url}`);
+  const usedIndexes = new Set<number>();
 
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let index: number;
+    do {
+      index = Math.floor(Math.random() * userAgents.length);
+    } while (usedIndexes.has(index));
+    usedIndexes.add(index);
+
+    const userAgent = userAgents[index];
+    console.log(`🔄 Attempt ${attempt}/3 for ${url}`);
+    console.log(`🕵️ Using User-Agent: ${userAgent.slice(0, 60)}...`);
+
+    try {
       const response = await fetch(url, {
         headers: {
-          "User-Agent": userAgents[attempt],
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "accept-language": "en-US,en;q=0.9",
+          "cache-control": "max-age=0",
+          priority: "u=0, i",
+          "sec-ch-ua":
+            '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": '"Windows"',
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-site": "none",
+          "sec-fetch-user": "?1",
+          "upgrade-insecure-requests": "1",
+          "User-Agent": userAgent,
         },
+        referrerPolicy: "strict-origin-when-cross-origin",
+        body: null,
         redirect: "follow",
+        method: "GET",
+        mode: "cors",
+        credentials: "include",
       });
 
       if (!response.ok) {
+        console.log(
+          `❌ Failed [${response.status}] for ${url}`,
+          await response.text()
+        );
         throw new Error(`HTTP ${response.status}`);
       }
 
@@ -720,16 +755,18 @@ async function fetchUrlContent(url: string): Promise<string> {
       const text = extractTextFromHTML(html);
 
       if (text.length > 200) {
+        console.log(`✅ Success on attempt ${attempt}`);
         return text;
+      } else {
+        throw Error(`⚠️ Content too short (length: ${text.length})`);
       }
-    } catch (error) {
-      console.error(`❌ Attempt ${attempt + 1} failed:`, error);
-      if (attempt < userAgents.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+    } catch (err) {
+      console.log(`🚫 Attempt ${attempt} error: ${(err as Error).message}`);
+      if (attempt < 3) await new Promise((res) => setTimeout(res, 1000));
     }
   }
 
+  console.log(`❎ All 3 attempts failed for ${url}`);
   return "";
 }
 
