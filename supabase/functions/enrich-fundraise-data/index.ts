@@ -1,6 +1,12 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
+declare const Deno: {
+  env: {
+    get(key: string): string | undefined;
+  };
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -18,6 +24,12 @@ interface FundraiseData {
   press_url_3?: string;
   investor_contacts?: string;
   status: "pending" | "processing" | "completed" | "error";
+}
+
+interface AnalyzedUrl {
+  url: string;
+  keywordCount: number;
+  keywords: string[];
 }
 
 serve(async (req) => {
@@ -58,35 +70,35 @@ serve(async (req) => {
 });
 
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
-  console.log(`🚀 Starting enrichment for ${record.company_name}`);
+  console.log(`\n🚀 Starting enrichment for ${record.company_name}`);
   
-  // Step 1: Try SERP API approach
-  console.log("📡 Attempting SERP API approach...");
+  // Step 1: Try SERP API approach first
+  console.log("\n📡 Attempting SERP API approach...");
   const serpResult = await trySerp(record);
   
-  if (serpResult.success && serpResult.urls.length > 0) {
-    console.log("✅ SERP API successful, extracting content...");
+  if (serpResult.success) {
+    console.log("\n✅ SERP API successful, extracting content...");
     const extractedData = await extractDataFromUrls(serpResult.urls, record);
     
     if (extractedData.investor_contacts !== "N/A" || extractedData.amount_raised !== "N/A") {
       return {
-        press_url_1: serpResult.urls[0] || "N/A",
-        press_url_2: serpResult.urls[1] || "N/A",
-        press_url_3: serpResult.urls[2] || "N/A",
+        press_url_1: serpResult.urls[0],
+        press_url_2: serpResult.urls[1],
+        press_url_3: serpResult.urls[2],
         investor_contacts: extractedData.investor_contacts,
         amount_raised: extractedData.amount_raised,
       };
     }
   }
   
-  console.log("🤖 SERP failed, trying GPT fallback...");
-  // Step 2: GPT fallback approach
+  // Step 2: GPT fallback if SERP didn't find enough relevant URLs
+  console.log("\n🤖 Not enough relevant URLs found, trying GPT fallback...");
   const gptResult = await tryGPTFallback(record);
   
   return {
-    press_url_1: gptResult.urls[0] || "N/A",
-    press_url_2: gptResult.urls[1] || "N/A", 
-    press_url_3: gptResult.urls[2] || "N/A",
+    press_url_1: gptResult.urls[0] || serpResult.urls[0] || "N/A",
+    press_url_2: gptResult.urls[1] || serpResult.urls[1] || "N/A", 
+    press_url_3: gptResult.urls[2] || serpResult.urls[2] || "N/A",
     investor_contacts: gptResult.investor_contacts,
     amount_raised: gptResult.amount_raised,
   };
@@ -96,15 +108,13 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) {
     console.error("❌ SERP_API_KEY not configured");
-    return {success: false, urls: []};
+    return {success: false, urls: ["N/A", "N/A", "N/A"]};
   }
 
   try {
-    // Construct the simple query just like the Python version
     const query = `${record.company_name} funding press release ${record.date_raised}`;
-    console.log(`🔍 Search query: "${query}"`);
+    console.log(`\n🔍 Starting SERP search with query: "${query}"`);
 
-    // Make the API call with the same parameters as the Python version
     const response = await fetch(
       `https://serpapi.com/search.json?` + new URLSearchParams({
         q: query,
@@ -122,26 +132,94 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     const data = await response.json();
     const organicResults = data.organic_results || [];
     
-    console.log(`📊 Found ${organicResults.length} organic results`);
+    console.log(`\n📊 Found ${organicResults.length} initial results from SERP`);
 
-    // Take the first 3 URLs directly from organic results, just like Python version
-    let urls = organicResults
-      .slice(0, 3)
-      .map((result: any) => result.link);
+    // Keywords to look for in content
+    const fundingKeywords = [
+      'raised',
+      'funding',
+      'investment',
+      'investors',
+      'led by',
+      'venture',
+      'capital',
+      'series',
+      'round',
+      'million',
+      'billion'
+    ];
 
-    // Pad with "N/A" if we have fewer than 3 results
-    while (urls.length < 3) {
-      urls.push("N/A");
+    // Analyze content of each URL
+    const analyzedUrls: AnalyzedUrl[] = [];
+    for (const result of organicResults) {
+      const url = result.link;
+      console.log(`\n🌐 Analyzing: ${url}`);
+      
+      try {
+        const content = await fetchUrlContent(url);
+        if (!content) {
+          console.log('  ⚠️ No content found');
+          continue;
+        }
+
+        // Check for company name in content
+        const companyNameLower = record.company_name.toLowerCase();
+        if (!content.toLowerCase().includes(companyNameLower)) {
+          console.log('  ⚠️ Company name not found in content');
+          continue;
+        }
+
+        // Count funding keywords found
+        const foundKeywords = fundingKeywords.filter(keyword => 
+          content.toLowerCase().includes(keyword.toLowerCase())
+        );
+
+        if (foundKeywords.length >= 3) {
+          console.log('  ✅ Relevant content found!');
+          console.log(`  📝 Keywords found: ${foundKeywords.join(', ')}`);
+          analyzedUrls.push({
+            url,
+            keywordCount: foundKeywords.length,
+            keywords: foundKeywords
+          });
+        } else {
+          console.log('  ⚠️ Not enough funding keywords found');
+        }
+      } catch (error) {
+        console.log(`  ❌ Error analyzing URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
     }
 
-    console.log(`✅ Press release URLs:`, urls);
-    
+    // Sort by keyword count and take top 3
+    analyzedUrls.sort((a, b) => b.keywordCount - a.keywordCount);
+    const topUrls = analyzedUrls.slice(0, 3).map(item => item.url);
+
+    console.log('\n🎯 Analysis Results:');
+    if (topUrls.length > 0) {
+      console.log('Found these relevant press releases:');
+      topUrls.forEach((url, index) => {
+        const analysis = analyzedUrls.find(a => a.url === url);
+        if (analysis) {
+          console.log(`\n${index + 1}. ${url}`);
+          console.log(`   Keywords found: ${analysis.keywords.join(', ')}`);
+        }
+      });
+    } else {
+      console.log('❌ No highly relevant press releases found');
+    }
+
+    // If we don't have 3 URLs, we'll need the GPT fallback
+    const success = topUrls.length === 3;
+    while (topUrls.length < 3) {
+      topUrls.push("N/A");
+    }
+
     return {
-      success: urls.some(url => url !== "N/A"),
-      urls: urls
+      success,
+      urls: topUrls
     };
   } catch (error) {
-    console.error("❌ SERP search failed:", error);
+    console.error("❌ SERP search failed:", error instanceof Error ? error.message : 'Unknown error');
     return {
       success: false,
       urls: ["N/A", "N/A", "N/A"]
