@@ -72,35 +72,62 @@ serve(async (req) => {
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
   console.log(`\n🚀 Starting enrichment for ${record.company_name}`);
   
-  // Step 1: Try SERP API approach first
-  console.log("\n📡 Attempting SERP API approach...");
+  // Step 1: Try primary SERP API approach
+  console.log("\n📡 Attempting primary SERP search...");
   const serpResult = await trySerp(record);
+  let urls = [...serpResult.urls];
   
-  if (serpResult.success) {
-    console.log("\n✅ SERP API successful, extracting content...");
-    const extractedData = await extractDataFromUrls(serpResult.urls, record);
+  // Step 2: If we don't have 3 good URLs, try alternative queries
+  if (urls.includes("N/A")) {
+    console.log("\n🔄 Not enough URLs found, trying alternative queries...");
+    const alternativeUrls = await tryAlternativeSearchQueries(record);
     
-    if (extractedData.investor_contacts !== "N/A" || extractedData.amount_raised !== "N/A") {
-      return {
-        press_url_1: serpResult.urls[0],
-        press_url_2: serpResult.urls[1],
-        press_url_3: serpResult.urls[2],
-        investor_contacts: extractedData.investor_contacts,
-        amount_raised: extractedData.amount_raised,
-      };
+    // Replace N/A entries with alternative URLs
+    for (let i = 0; i < urls.length; i++) {
+      if (urls[i] === "N/A" && alternativeUrls.length > 0) {
+        urls[i] = alternativeUrls.shift()!;
+      }
     }
   }
   
-  // Step 2: GPT fallback if SERP didn't find enough relevant URLs
-  console.log("\n🤖 Not enough relevant URLs found, trying GPT fallback...");
-  const gptResult = await tryGPTFallback(record);
+  // Step 3: If still missing URLs, try news APIs
+  if (urls.includes("N/A")) {
+    console.log("\n📰 Still missing URLs, trying news sources...");
+    const newsUrls = await tryNewsAPIs(record);
+    
+    // Replace remaining N/A entries with news URLs
+    for (let i = 0; i < urls.length; i++) {
+      if (urls[i] === "N/A" && newsUrls.length > 0) {
+        urls[i] = newsUrls.shift()!;
+      }
+    }
+  }
   
+  // Step 4: Only if all else fails, try GPT
+  if (urls.includes("N/A")) {
+    console.log("\n🤖 Still missing URLs, trying GPT fallback...");
+    const gptResult = await tryGPTFallback(record);
+    
+    // Replace any remaining N/A entries with GPT results
+    for (let i = 0; i < urls.length; i++) {
+      if (urls[i] === "N/A" && gptResult.urls[i]) {
+        urls[i] = gptResult.urls[i];
+      }
+    }
+  }
+
+  // Log final results
+  console.log("\n🎯 Final Results:");
+  urls.forEach((url, index) => {
+    console.log(`${index + 1}. ${url}`);
+  });
+
   return {
-    press_url_1: gptResult.urls[0] || serpResult.urls[0] || "N/A",
-    press_url_2: gptResult.urls[1] || serpResult.urls[1] || "N/A", 
-    press_url_3: gptResult.urls[2] || serpResult.urls[2] || "N/A",
-    investor_contacts: gptResult.investor_contacts,
-    amount_raised: gptResult.amount_raised,
+    press_url_1: urls[0],
+    press_url_2: urls[1],
+    press_url_3: urls[2],
+    investor_contacts: urls.some(url => url !== "N/A") ? await extractInvestorInfo(urls, record) : "N/A",
+    amount_raised: record.amount_raised
   };
 }
 
@@ -623,4 +650,153 @@ Return in JSON format:
       amount_raised: "N/A",
     };
   }
+}
+
+async function tryAlternativeSearchQueries(record: FundraiseData): Promise<string[]> {
+  const serpApiKey = Deno.env.get("SERP_API_KEY");
+  if (!serpApiKey) return [];
+
+  // Alternative search queries to try
+  const queries = [
+    `${record.company_name} announces ${record.amount_raised} funding`,
+    `${record.company_name} secures investment ${record.investors || ''}`,
+    `${record.company_name} investment news ${record.date_raised}`,
+    `${record.company_name} financing round announcement`,
+    `${record.company_name} raises capital press release`
+  ];
+
+  console.log("\n🔄 Trying alternative search queries...");
+  
+  const allUrls: AnalyzedUrl[] = [];
+  
+  for (const query of queries) {
+    try {
+      console.log(`\n🔍 Trying query: "${query}"`);
+      
+      const response = await fetch(
+        `https://serpapi.com/search.json?` + new URLSearchParams({
+          q: query,
+          api_key: serpApiKey,
+          hl: "en",
+          gl: "us",
+          num: "5"
+        })
+      );
+
+      if (!response.ok) continue;
+
+      const data = await response.json();
+      const results = data.organic_results || [];
+      
+      for (const result of results) {
+        const url = result.link;
+        const content = await fetchUrlContent(url);
+        
+        if (!content) continue;
+        
+        // Check for company name and funding keywords
+        const companyNameLower = record.company_name.toLowerCase();
+        const contentLower = content.toLowerCase();
+        
+        if (!contentLower.includes(companyNameLower)) continue;
+        
+        const foundKeywords = fundingKeywords.filter(keyword => 
+          contentLower.includes(keyword.toLowerCase())
+        );
+
+        if (foundKeywords.length >= 2) { // More lenient keyword requirement for fallback
+          allUrls.push({
+            url,
+            keywordCount: foundKeywords.length,
+            keywords: foundKeywords
+          });
+        }
+      }
+    } catch (error) {
+      console.log(`  ⚠️ Error with query "${query}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+      continue;
+    }
+  }
+
+  // Remove duplicates and sort by keyword count
+  const uniqueUrls = Array.from(new Set(allUrls.map(item => item.url)))
+    .map(url => allUrls.find(item => item.url === url)!)
+    .sort((a, b) => b.keywordCount - a.keywordCount)
+    .map(item => item.url);
+
+  console.log(`\n📊 Found ${uniqueUrls.length} additional URLs from alternative queries`);
+  return uniqueUrls;
+}
+
+async function tryNewsAPIs(record: FundraiseData): Promise<string[]> {
+  console.log("\n📰 Trying news API sources...");
+  
+  // This is where you could integrate with other news APIs
+  // For now, we'll use a simple web search with news-specific terms
+  const serpApiKey = Deno.env.get("SERP_API_KEY");
+  if (!serpApiKey) return [];
+
+  try {
+    const query = `${record.company_name} funding news site:techcrunch.com OR site:bloomberg.com OR site:reuters.com OR site:businesswire.com OR site:prnewswire.com`;
+    
+    const response = await fetch(
+      `https://serpapi.com/search.json?` + new URLSearchParams({
+        q: query,
+        api_key: serpApiKey,
+        hl: "en",
+        gl: "us",
+        num: "5"
+      })
+    );
+
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    return (data.organic_results || [])
+      .map((result: any) => result.link)
+      .filter((url: string) => url);
+  } catch (error) {
+    console.log("  ⚠️ News API search failed");
+    return [];
+  }
+}
+
+// Common keywords to look for in content
+const fundingKeywords = [
+  'raised',
+  'funding',
+  'investment',
+  'investors'
+];
+
+async function extractInvestorInfo(urls: string[], record: FundraiseData): Promise<string> {
+  // Try to extract investor information from all available URLs
+  let allContent = '';
+  for (const url of urls) {
+    if (url === "N/A") continue;
+    try {
+      const content = await fetchUrlContent(url);
+      if (content) {
+        allContent += ' ' + content;
+      }
+    } catch (error) {
+      console.log(`  ⚠️ Error fetching content from ${url}`);
+    }
+  }
+
+  // If we have content, try to extract investor information
+  if (allContent) {
+    try {
+      const investorInfo = await extractInvestorNamesWithLLM(
+        allContent,
+        record.company_name,
+        record.investors || ''
+      );
+      return investorInfo;
+    } catch (error) {
+      console.log('  ⚠️ Error extracting investor information');
+    }
+  }
+
+  return "N/A";
 }
