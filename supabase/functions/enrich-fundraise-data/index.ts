@@ -240,14 +240,29 @@ interface SearchResult {
   urls: string[];
 }
 
-const getPromptForGoogleSearch = (company_name, investors) => {
-  const exclude_files =
-    " -filetype:pdf -filetype:doc -filetype:docx -filetype:xls -filetype:ppt -filetype:txt -filetype:rtf";
-  const main_prompt = `${company_name} investor ${
-    investors || ""
+const getPromptForGoogleSearch = (
+  company_name: string,
+  investors?: string
+): string => {
+  const excludeFiles =
+    "-filetype:pdf -filetype:doc -filetype:docx -filetype:xls -filetype:ppt -filetype:txt -filetype:rtf";
+
+  // const topSources = [
+  //   "crunchbase.com",
+  //   "techcrunch.com",
+  //   "businesswire.com",
+  //   "prnewswire.com",
+  //   "reuters.com",
+  //   "globenewswire.com",
+  //   "venturebeat.com",
+  //   "forbes.com",
+  // ].join(" OR ");
+
+  const baseQuery = `"${company_name}" funding round ${
+    investors ? `${investors}` : ""
   } press release`;
 
-  return main_prompt + exclude_files;
+  return `${baseQuery} ${excludeFiles}`.trim();
 };
 
 export async function searchFundingPressReleasesGoogle(
@@ -524,6 +539,7 @@ Extract:
 1. Individual investors and their roles (format: "Name (Role, Firm)")
 2. funding amount with currency
 
+if you dont find the data in the content search the internet for it
 
 Return in JSON format in a single line and not extra text other than the json :
 {
