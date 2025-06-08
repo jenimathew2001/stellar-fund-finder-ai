@@ -125,90 +125,41 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   }
 
   try {
-    const query = `${record.company_name} funding press release ${record.date_raised}`;
-    console.log(`\n🔍 Starting SERP search with query: "${query}"`);
+    // First try press release sites
+    const pressQuery = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`;
+    console.log(`\n🔍 SERP search 1: "${pressQuery}"`);
 
-    const response = await fetch(
-      `https://serpapi.com/search.json?` + new URLSearchParams({
-        q: query,
-        api_key: serpApiKey,
-        hl: "en",
-        gl: "us",
-        num: "10"
-      })
-    );
-
-    if (!response.ok) {
-      throw new Error(`SERP API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const organicResults = data.organic_results || [];
+    let urls = await performSerpSearch(pressQuery, serpApiKey, record.company_name);
     
-    console.log(`\n📊 Found ${organicResults.length} initial results from SERP`);
-
-    // Analyze content of each URL
-    const analyzedUrls: AnalyzedUrl[] = [];
-    for (const result of organicResults) {
-      const url = result.link;
-      console.log(`\n🔍 Analyzing: ${url}`);
-      
-      try {
-        const content = await fetchUrlContent(url);
-        if (!content) {
-          console.log('  ⚠️ No content found');
-          continue;
-        }
-
-        // Check for company name and funding keywords
-        const companyNameLower = record.company_name.toLowerCase();
-        const contentLower = content.toLowerCase();
-        
-        if (!contentLower.includes(companyNameLower)) {
-          console.log('  ⚠️ Company name not found in content');
-          continue;
-        }
-
-        const foundKeywords = fundingKeywords.filter(keyword => 
-          contentLower.includes(keyword.toLowerCase())
-        );
-
-        if (foundKeywords.length >= 2) {
-          console.log('  ✅ Relevant content found!');
-          console.log(`  📝 Keywords found: ${foundKeywords.join(', ')}`);
-          analyzedUrls.push({
-            url,
-            keywordCount: foundKeywords.length,
-            keywords: foundKeywords
-          });
-        } else {
-          console.log('  ⚠️ Not enough funding keywords found');
-        }
-      } catch (error) {
-        console.log(`  ❌ Error analyzing URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+    // If we found high-quality results (2 or more relevant URLs), return early
+    if (urls.length >= 2) {
+      console.log("\n✨ Found multiple high-quality press release URLs, stopping search");
+      return {success: true, urls};
     }
 
-    // Sort by keyword count and take top 3
-    analyzedUrls.sort((a, b) => b.keywordCount - a.keywordCount);
-    const topUrls = analyzedUrls.slice(0, 3).map(item => item.url);
+    // If not enough results, try a broader search
+    const broadQuery = `${record.company_name} raises million funding ${record.date_raised}`;
+    console.log(`\n🔍 SERP search 2: "${broadQuery}"`);
 
-    // Log results
-    if (topUrls.length > 0) {
-      console.log('\n✅ Found relevant press releases:');
-      topUrls.forEach((url, index) => {
-        const analysis = analyzedUrls.find(a => a.url === url);
-        console.log(`\n${index + 1}. ${url}`);
-        console.log(`   Keywords found: ${analysis?.keywords.join(', ')}`);
-      });
-    } else {
-      console.log('\n❌ No relevant press releases found from SERP');
+    const broadResults = await performSerpSearch(broadQuery, serpApiKey, record.company_name);
+    urls = [...new Set([...urls, ...broadResults])]; // Combine and deduplicate
+
+    // If we now have enough results, return
+    if (urls.length >= 2) {
+      console.log("\n✨ Found enough high-quality URLs from broad search, stopping");
+      return {success: true, urls};
     }
 
-    // Consider successful only if we found at least one relevant URL
+    // Final attempt with tech news sites
+    const techQuery = `${record.company_name} investment round ${record.date_raised} site:techcrunch.com OR site:venturebeat.com`;
+    console.log(`\n🔍 SERP search 3: "${techQuery}"`);
+
+    const techResults = await performSerpSearch(techQuery, serpApiKey, record.company_name);
+    urls = [...new Set([...urls, ...techResults])]; // Combine and deduplicate
+
     return {
-      success: topUrls.length > 0,
-      urls: topUrls
+      success: urls.length > 0,
+      urls: urls.slice(0, 3) // Return max 3 URLs
     };
   } catch (error) {
     console.error("❌ SERP search failed:", error instanceof Error ? error.message : 'Unknown error');
@@ -217,6 +168,76 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
       urls: []
     };
   }
+}
+
+async function performSerpSearch(query: string, apiKey: string, companyName: string): Promise<string[]> {
+  const response = await fetch(
+    `https://serpapi.com/search.json?` + new URLSearchParams({
+      q: query,
+      api_key: apiKey,
+      hl: "en",
+      gl: "us",
+      num: "10"
+    })
+  );
+
+  if (!response.ok) {
+    throw new Error(`SERP API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const organicResults = data.organic_results || [];
+  
+  console.log(`\n📊 Found ${organicResults.length} results`);
+
+  // Analyze content of each URL
+  const analyzedUrls: AnalyzedUrl[] = [];
+  for (const result of organicResults) {
+    const url = result.link;
+    console.log(`\n🌐 Processing: ${url}`);
+    
+    try {
+      const content = await fetchUrlContent(url);
+      if (!content) {
+        console.log('⚠️ No content found');
+        continue;
+      }
+
+      // Check for company name and funding keywords
+      const companyNameLower = companyName.toLowerCase();
+      const contentLower = content.toLowerCase();
+      
+      if (!contentLower.includes(companyNameLower)) {
+        console.log('⚠️ Company name not found in content');
+        continue;
+      }
+
+      const foundKeywords = fundingKeywords.filter(keyword => 
+        contentLower.includes(keyword.toLowerCase())
+      );
+
+      if (foundKeywords.length >= 2) {
+        console.log('✅ Relevant content found!');
+        console.log(`📝 Keywords found: ${foundKeywords.join(', ')}`);
+        analyzedUrls.push({
+          url,
+          keywordCount: foundKeywords.length,
+          keywords: foundKeywords
+        });
+      } else {
+        console.log('⚠️ Not enough funding keywords found');
+      }
+    } catch (error) {
+      console.log(`❌ Error analyzing URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  // Sort by keyword count and return URLs
+  analyzedUrls.sort((a, b) => b.keywordCount - a.keywordCount);
+  const filteredUrls = analyzedUrls.map(item => item.url);
+
+  console.log(`\n✅ Filtered URLs: ${filteredUrls.join(',')}`);
+  return filteredUrls;
 }
 
 function isPressReleaseUrl(url: string, companyName: string): boolean {
@@ -400,8 +421,10 @@ async function extractInvestorNamesWithLLM(
   knownInvestors: string
 ): Promise<string> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
-  if (!groqApiKey) {
-    console.error("❌ GROQ_API_KEY not configured");
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  
+  if (!groqApiKey && !openaiApiKey) {
+    console.error("❌ Neither GROQ_API_KEY nor OPENAI_API_KEY configured");
     return "N/A";
   }
 
@@ -428,61 +451,128 @@ ${text.slice(0, 6000)}
 
 Return ONLY the formatted investor names:`;
 
-  try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${groqApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "llama3-8b-8192",
-        messages: [
-          {
-            role: "system",
-            content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: 0.1,
-        max_tokens: 300,
-      }),
-    });
+  // Try Groq first if available
+  if (groqApiKey) {
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${groqApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "llama3-8b-8192",
+          messages: [
+            {
+              role: "system",
+              content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 300,
+        }),
+      });
 
-    if (!response.ok) {
-      throw new Error(`Groq API error: ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 429) {
+          console.log("⚠️ Groq API rate limit hit, falling back to OpenAI");
+          throw new Error("Rate limit");
+        }
+        throw new Error(`Groq API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const result = data.choices[0]?.message?.content || "N/A";
+
+      console.log("🤖 LLaMA extracted investor names:", result);
+
+      // Validate the result format
+      if (
+        result.toLowerCase().includes("n/a") ||
+        result.toLowerCase().includes("no individual") ||
+        result.toLowerCase().includes("not found") ||
+        !result.includes("(") || // Must have parentheses for firm names
+        result.trim().length < 5
+      ) {
+        return "N/A";
+      }
+
+      return result.trim();
+    } catch (error) {
+      // If it's not a rate limit error and we don't have OpenAI as fallback, return N/A
+      if (error.message !== "Rate limit" || !openaiApiKey) {
+        console.error("💥 Error extracting investor names:", error);
+        return "N/A";
+      }
     }
+  }
 
-    const data = await response.json();
-    const result = data.choices[0]?.message?.content || "N/A";
+  // OpenAI fallback
+  if (openaiApiKey) {
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 300,
+        }),
+      });
 
-    console.log("🤖 Extracted investor names:", result);
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`);
+      }
 
-    // Validate the result format
-    if (
-      result.toLowerCase().includes("n/a") ||
-      result.toLowerCase().includes("no individual") ||
-      result.toLowerCase().includes("not found") ||
-      !result.includes("(") || // Must have parentheses for firm names
-      result.trim().length < 5
-    ) {
+      const data = await response.json();
+      const result = data.choices[0]?.message?.content || "N/A";
+
+      console.log("🤖 GPT extracted investor names:", result);
+
+      // Validate the result format
+      if (
+        result.toLowerCase().includes("n/a") ||
+        result.toLowerCase().includes("no individual") ||
+        result.toLowerCase().includes("not found") ||
+        !result.includes("(") || // Must have parentheses for firm names
+        result.trim().length < 5
+      ) {
+        return "N/A";
+      }
+
+      return result.trim();
+    } catch (error) {
+      console.error("💥 Error extracting investor names with OpenAI:", error);
       return "N/A";
     }
-
-    return result.trim();
-  } catch (error) {
-    console.error("💥 Error extracting investor names:", error);
-    return "N/A";
   }
+
+  return "N/A";
 }
 
 async function extractAmountWithLLM(content: string, companyName: string): Promise<string> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
-  if (!groqApiKey) {
-    console.error("❌ GROQ_API_KEY not configured");
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  
+  if (!groqApiKey && !openaiApiKey) {
+    console.error("❌ Neither GROQ_API_KEY nor OPENAI_API_KEY configured");
     return "N/A";
   }
 
@@ -501,37 +591,88 @@ TASK:
 FORMAT:
 Return ONLY the amount, nothing else.`;
 
-  try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${groqApiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "mixtral-8x7b-32768",
-        messages: [
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 50
-      })
-    });
+  // Try Groq first if available
+  if (groqApiKey) {
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${groqApiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "mixtral-8x7b-32768",
+          messages: [
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          temperature: 0.1,
+          max_tokens: 50
+        })
+      });
 
-    if (!response.ok) {
-      throw new Error(`LLM API error: ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 429) {
+          console.log("⚠️ Groq API rate limit hit, falling back to OpenAI");
+          throw new Error("Rate limit");
+        }
+        throw new Error(`Groq API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const amount = data.choices[0].message.content.trim();
+      return amount === "N/A" ? "N/A" : amount;
+    } catch (error) {
+      // If it's not a rate limit error and we don't have OpenAI as fallback, return N/A
+      if (error.message !== "Rate limit" || !openaiApiKey) {
+        console.error("❌ Error extracting amount:", error instanceof Error ? error.message : 'Unknown error');
+        return "N/A";
+      }
     }
-
-    const data = await response.json();
-    const amount = data.choices[0].message.content.trim();
-    return amount === "N/A" ? "N/A" : amount;
-  } catch (error) {
-    console.error("❌ Error extracting amount:", error instanceof Error ? error.message : 'Unknown error');
-    return "N/A";
   }
+
+  // OpenAI fallback
+  if (openaiApiKey) {
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "You are a precise extractor of funding amounts from press releases. Return only the amount or 'N/A'."
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 50,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const amount = data.choices[0].message.content.trim();
+      return amount === "N/A" ? "N/A" : amount;
+    } catch (error) {
+      console.error("❌ Error extracting amount with OpenAI:", error instanceof Error ? error.message : 'Unknown error');
+      return "N/A";
+    }
+  }
+
+  return "N/A";
 }
 
 async function tryGPTFallback(record: FundraiseData): Promise<{
