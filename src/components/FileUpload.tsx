@@ -19,6 +19,25 @@ const normalizeColumnName = (name: string): string => {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 };
 
+const formatDate = (dateValue: string | number): string => {
+  // Handle Excel date number format
+  if (!isNaN(Number(dateValue))) {
+    const excelDate = new Date((Number(dateValue) - 25569) * 86400 * 1000);
+    if (!isNaN(excelDate.getTime())) {
+      return excelDate.toISOString().split('T')[0]; // Returns YYYY-MM-DD
+    }
+  }
+  
+  // Try parsing as regular date string
+  const date = new Date(dateValue);
+  if (!isNaN(date.getTime())) {
+    return date.toISOString().split('T')[0];
+  }
+  
+  // If all parsing fails, return the original value
+  return String(dateValue);
+};
+
 const findColumnValue = (row: unknown, possibleNames: string[]): string => {
   // First try exact matches
   for (const name of possibleNames) {
@@ -168,7 +187,7 @@ export const FileUpload = ({ onFileUpload }: FileUploadProps) => {
           if (companyName) {
             processedData.push({
               company_name: companyName,
-              date_raised: dateRaised || "Not specified",
+              date_raised: dateRaised ? formatDate(dateRaised) : "Not specified",
               amount_raised: amountRaised || "Not specified",
               investors: investors || "Not specified",
               status: "pending" as const,
