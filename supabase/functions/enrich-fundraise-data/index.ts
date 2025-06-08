@@ -75,170 +75,183 @@ serve(async (req) => {
   }
 });
 
+/**
+ * Main function to enrich fundraise data. The process follows these steps:
+ * 1. Try GPT-4 first to get URLs, amount, and investor info
+ * 2. Validate GPT-4 provided URLs by checking content
+ * 3. If needed, use SERP to find additional URLs
+ * 4. Extract and verify information from valid URLs
+ * 5. Final GPT-4 attempt if any information is missing
+ */
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
   console.log(`\n🚀 Starting enrichment for ${record.company_name}`);
   
-  // Step 1: Try SERP API approach
-  console.log("\n📡 Attempting SERP search for relevant URLs...");
-  const serpResult = await trySerp(record);
+  // Step 1: Try GPT-4 first for all information
+  console.log("\n🤖 Attempting GPT-4 for initial data gathering...");
+  const gptResult = await tryGPT4Initial(record);
   
-  if (serpResult.success) {
-    console.log("\n✨ SERP found relevant URLs!");
-    console.log("📑 Using LLaMA to extract information from URL contents...");
+  // Step 2: Validate URLs from GPT-4
+  console.log("\n🔍 Validating GPT-4 provided URLs...");
+  const validatedUrls = await validateAndAnalyzeUrls(gptResult.urls, record.company_name);
+  
+  let finalUrls = validatedUrls;
+  let finalInvestorContacts = gptResult.investor_contacts;
+  let finalAmount = gptResult.amount_raised;
+
+  // Step 3: If not enough valid URLs, use SERP to find more
+  if (validatedUrls.length < 3) {
+    console.log(`\n⚠️ Only found ${validatedUrls.length} valid URLs from GPT-4, trying SERP for more...`);
+    const remainingCount = 3 - validatedUrls.length;
+    const serpResult = await trySerpForRemaining(record, remainingCount, validatedUrls);
+    finalUrls = [...validatedUrls, ...serpResult.urls].slice(0, 3); // Ensure max 3 URLs
+  }
+
+  // Step 4: Extract information from valid URLs if needed
+  if (finalUrls.length > 0 && (finalAmount === "N/A" || finalInvestorContacts === "N/A")) {
+    console.log("\n📑 Extracting information from validated URLs...");
+    const extractedData = await extractDataFromUrls(finalUrls, record);
     
-    const extractedData = await extractDataFromUrls(serpResult.urls, record);
+    if (finalAmount === "N/A") finalAmount = extractedData.amount_raised;
+    if (finalInvestorContacts === "N/A") finalInvestorContacts = extractedData.investor_contacts;
+  }
+
+  // Step 5: Final validation and GPT-4 attempt if needed
+  if (!isEnrichmentComplete(finalUrls, finalAmount, finalInvestorContacts)) {
+    console.log("\n⚠️ Enrichment incomplete, trying one final GPT-4 attempt...");
+    const finalAttempt = await tryFinalGPT4Attempt(record, finalUrls, finalAmount, finalInvestorContacts);
     
-    if (extractedData.investor_contacts !== "N/A" || extractedData.amount_raised !== "N/A") {
-      console.log("\n✅ Successfully extracted information using SERP + LLaMA");
-      console.log("⏩ Skipping GPT fallback as we have good data");
-      
-      return {
-        press_url_1: extractedData.urls[0] || "N/A",
-        press_url_2: extractedData.urls[1] || "N/A",
-        press_url_3: extractedData.urls[2] || "N/A",
-        investor_contacts: extractedData.investor_contacts,
-        amount_raised: extractedData.amount_raised
-      };
+    if (finalAmount === "N/A") finalAmount = finalAttempt.amount_raised;
+    if (finalInvestorContacts === "N/A") finalInvestorContacts = finalAttempt.investor_contacts;
+    if (finalUrls.length < 3) {
+      const newUrls = await validateAndAnalyzeUrls(finalAttempt.urls, record.company_name);
+      finalUrls = [...new Set([...finalUrls, ...newUrls])].slice(0, 3);
     }
   }
-  
-  // Step 2: If SERP failed or couldn't extract good data, use GPT fallback
-  console.log("\n⚠️ SERP approach didn't yield good results");
-  console.log("🤖 Falling back to GPT for complete information...");
-  const gptResult = await tryGPTFallback(record);
-  
-  console.log("\n✅ Using GPT results for all fields");
+
   return {
-    press_url_1: gptResult.urls[0] || "N/A",
-    press_url_2: gptResult.urls[1] || "N/A", 
-    press_url_3: gptResult.urls[2] || "N/A",
-    investor_contacts: gptResult.investor_contacts,
-    amount_raised: gptResult.amount_raised
+    press_url_1: finalUrls[0] || "N/A",
+    press_url_2: finalUrls[1] || "N/A",
+    press_url_3: finalUrls[2] || "N/A",
+    investor_contacts: finalInvestorContacts,
+    amount_raised: finalAmount
   };
 }
 
-async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: string[]}> {
-  const serpApiKey = Deno.env.get("SERP_API_KEY");
-  if (!serpApiKey) {
-    console.error("❌ SERP_API_KEY not configured");
-    return {success: false, urls: []};
+/**
+ * Initial GPT-4 attempt to get all required information.
+ * Uses high confidence threshold to ensure quality results.
+ */
+async function tryGPT4Initial(record: FundraiseData): Promise<{
+  urls: string[];
+  investor_contacts: string;
+  amount_raised: string;
+}> {
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!openaiApiKey) {
+    console.error("❌ OPENAI_API_KEY not configured");
+    return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
   }
+
+  const prompt = `Find accurate information about ${record.company_name}'s funding round.
+
+Company: ${record.company_name}
+Known Investors: ${record.investors || 'Unknown'}
+Date: ${record.date_raised || 'Recent'}
+
+Tasks:
+1. Find 3 most relevant press release or news URLs about this funding round
+   - Focus on official press releases, major tech news sites, or financial news
+   - Ensure URLs are specific to this company and funding round
+   - Prioritize: businesswire.com, prnewswire.com, globenewswire.com, techcrunch.com, reuters.com
+
+2. Identify individual investors or investment firm representatives
+   - Find specific people who led or participated in the investment
+   - Include their roles and firms
+   - Format as: "Full Name (Role, Firm)"
+
+3. Determine the exact funding amount raised
+   - Include currency symbol
+   - Use standard format like "$100 million" or "€50M"
+
+Return in JSON format:
+{
+  "urls": ["url1", "url2", "url3"],
+  "investor_contacts": "Name (Role, Firm), Name2 (Role, Firm2)",
+  "amount_raised": "$X million",
+  "confidence_score": 0.9
+}`;
 
   try {
-    let allUrls: AnalyzedUrl[] = [];
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4",
+        messages: [
+          {
+            role: "system",
+            content: "You are an expert in venture capital research. Provide accurate, verified information only."
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 800,
+      }),
+    });
 
-    // First try press release sites
-    const pressQuery = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`;
-    console.log(`\n🔍 SERP search 1: "${pressQuery}"`);
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.status}`);
+    }
 
-    const pressUrls = await performSerpSearch(pressQuery, serpApiKey, record.company_name);
-    allUrls = [...allUrls, ...pressUrls.map(url => ({
-      url,
-      keywordCount: 3, // Priority for press release sites
-      keywords: ['press', 'release', 'funding']
-    }))];
+    const data = await response.json();
+    const result = JSON.parse(data.choices[0]?.message?.content || "{}");
     
-    // If we found high-quality results (2 or more unique relevant URLs), return early
-    const uniquePressUrls = getUniqueUrls(allUrls);
-    if (uniquePressUrls.length >= 2) {
-      console.log("\n✨ Found multiple high-quality press release URLs, stopping search");
-      return {success: true, urls: uniquePressUrls.slice(0, 3)};
+    console.log("🤖 GPT-4 Initial Result:", result);
+    
+    // Only accept results with high confidence
+    if (result.confidence_score && result.confidence_score >= 0.8) {
+      return {
+        urls: result.urls || [],
+        investor_contacts: result.investor_contacts || "N/A",
+        amount_raised: result.amount_raised || "N/A"
+      };
+    } else {
+      console.log("⚠️ Low confidence in GPT-4 results, treating as N/A");
+      return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
     }
-
-    // If not enough results, try a broader search
-    const broadQuery = `${record.company_name} raises million funding ${record.date_raised}`;
-    console.log(`\n🔍 SERP search 2: "${broadQuery}"`);
-
-    const broadResults = await performSerpSearch(broadQuery, serpApiKey, record.company_name);
-    allUrls = [...allUrls, ...broadResults.map(url => ({
-      url,
-      keywordCount: 2,
-      keywords: ['funding', 'raises']
-    }))];
-
-    // Check unique URLs again
-    const uniqueBroadUrls = getUniqueUrls(allUrls);
-    if (uniqueBroadUrls.length >= 2) {
-      console.log("\n✨ Found enough high-quality URLs from broad search, stopping");
-      return {success: true, urls: uniqueBroadUrls.slice(0, 3)};
-    }
-
-    // Final attempt with tech news sites
-    const techQuery = `${record.company_name} investment round ${record.date_raised} site:techcrunch.com OR site:venturebeat.com`;
-    console.log(`\n🔍 SERP search 3: "${techQuery}"`);
-
-    const techResults = await performSerpSearch(techQuery, serpApiKey, record.company_name);
-    allUrls = [...allUrls, ...techResults.map(url => ({
-      url,
-      keywordCount: 1,
-      keywords: ['investment']
-    }))];
-
-    // Get final unique URLs
-    const finalUrls = getUniqueUrls(allUrls);
-    return {
-      success: finalUrls.length > 0,
-      urls: finalUrls.slice(0, 3)
-    };
   } catch (error) {
-    console.error("❌ SERP search failed:", error instanceof Error ? error.message : 'Unknown error');
-    return {
-      success: false,
-      urls: []
-    };
+    console.error("❌ GPT-4 initial attempt failed:", error);
+    return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
   }
 }
 
-// Helper function to get unique URLs prioritized by keywordCount
-function getUniqueUrls(analyzedUrls: AnalyzedUrl[]): string[] {
-  // First deduplicate by URL
-  const uniqueMap = new Map<string, AnalyzedUrl>();
-  for (const item of analyzedUrls) {
-    if (!uniqueMap.has(item.url) || uniqueMap.get(item.url)!.keywordCount < item.keywordCount) {
-      uniqueMap.set(item.url, item);
-    }
-  }
-
-  // Convert back to array and sort by keywordCount
-  return Array.from(uniqueMap.values())
-    .sort((a, b) => b.keywordCount - a.keywordCount)
-    .map(item => item.url);
-}
-
-async function performSerpSearch(query: string, apiKey: string, companyName: string): Promise<string[]> {
-      const response = await fetch(
-    `https://serpapi.com/search.json?` + new URLSearchParams({
-      q: query,
-      api_key: apiKey,
-      hl: "en",
-      gl: "us",
-      num: "10"
-    })
-      );
-
-      if (!response.ok) {
-    throw new Error(`SERP API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const organicResults = data.organic_results || [];
-      
-  console.log(`\n📊 Found ${organicResults.length} results`);
-
-  // Analyze content of each URL
-  const analyzedUrls: AnalyzedUrl[] = [];
-  for (const result of organicResults) {
-    const url = result.link;
-    console.log(`\n🌐 Processing: ${url}`);
-    
+/**
+ * Validates URLs by checking their content for relevance.
+ * A URL is considered valid if:
+ * 1. Content is accessible
+ * 2. Contains the company name
+ * 3. Has enough funding-related keywords
+ * 4. Comes from reputable sources
+ */
+async function validateAndAnalyzeUrls(urls: string[], companyName: string): Promise<string[]> {
+  const validUrls: {url: string; relevanceScore: number}[] = [];
+  
+  for (const url of urls) {
     try {
+      console.log(`\n🔍 Validating URL: ${url}`);
       const content = await fetchUrlContent(url);
+      
       if (!content) {
         console.log('⚠️ No content found');
         continue;
       }
 
-      // Check for company name and funding keywords
       const companyNameLower = companyName.toLowerCase();
       const contentLower = content.toLowerCase();
       
@@ -247,65 +260,219 @@ async function performSerpSearch(query: string, apiKey: string, companyName: str
         continue;
       }
 
+      // Calculate relevance score based on keywords and source
+      let relevanceScore = 0;
+      const fundingKeywords = ['funding', 'investment', 'raises', 'raised', 'round', 'capital'];
       const foundKeywords = fundingKeywords.filter(keyword => 
         contentLower.includes(keyword.toLowerCase())
       );
 
-      if (foundKeywords.length >= 2) {
-        console.log('✅ Relevant content found!');
-        console.log(`📝 Keywords found: ${foundKeywords.join(', ')}`);
-        analyzedUrls.push({
-          url,
-          keywordCount: foundKeywords.length,
-          keywords: foundKeywords
-        });
+      relevanceScore = foundKeywords.length;
+
+      // Boost score for reputable sources
+      if (url.includes('press-release') || url.includes('news')) relevanceScore += 1;
+      if (/businesswire\.com|prnewswire\.com|globenewswire\.com/.test(url)) relevanceScore += 2;
+      if (/techcrunch\.com|reuters\.com|bloomberg\.com/.test(url)) relevanceScore += 1;
+
+      if (relevanceScore >= 2) {
+        console.log(`✅ Valid URL found! Relevance score: ${relevanceScore}`);
+        validUrls.push({url, relevanceScore});
       } else {
-        console.log('⚠️ Not enough funding keywords found');
+        console.log(`⚠️ URL failed relevance check (score: ${relevanceScore})`);
       }
     } catch (error) {
-      console.log(`❌ Error analyzing URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.log(`❌ Error validating URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  // Sort by keyword count and return URLs
-  analyzedUrls.sort((a, b) => b.keywordCount - a.keywordCount);
-  const filteredUrls = analyzedUrls.map(item => item.url);
-
-  console.log(`\n✅ Filtered URLs: ${filteredUrls.join(',')}`);
-  return filteredUrls;
+  // Return unique URLs sorted by relevance
+  return Array.from(new Set(
+    validUrls
+      .sort((a, b) => b.relevanceScore - a.relevanceScore)
+      .map(item => item.url)
+  ));
 }
 
-function isPressReleaseUrl(url: string, companyName: string): boolean {
-  const urlLower = url.toLowerCase();
-  const companyLower = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
+/**
+ * Uses SERP API to find additional URLs when GPT-4 results are insufficient.
+ * Focuses on press releases and tech news sites.
+ */
+async function trySerpForRemaining(
+  record: FundraiseData, 
+  count: number, 
+  existingUrls: string[]
+): Promise<{urls: string[]}> {
+  const serpApiKey = Deno.env.get("SERP_API_KEY");
+  if (!serpApiKey) {
+    console.error("❌ SERP_API_KEY not configured");
+    return {urls: []};
+  }
 
-  // Priority domains for press releases
-  const pressReleaseDomains = [
-    "businesswire.com",
-    "prnewswire.com", 
-    "globenewswire.com",
-    "techcrunch.com",
-    "venturebeat.com",
-    "reuters.com",
-    "bloomberg.com",
-    "yahoo.com/finance",
-    "benzinga.com",
-  ];
+  try {
+    const query = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com OR site:techcrunch.com`;
+    console.log(`\n🔍 SERP search for remaining URLs: "${query}"`);
 
-  const hasPressReleaseDomain = pressReleaseDomains.some(domain => urlLower.includes(domain));
-  const hasCompanyName = urlLower.includes(companyLower);
-  const hasFundingKeywords = urlLower.includes("funding") || 
-                             urlLower.includes("investment") || 
-                             urlLower.includes("raise") || 
-                             urlLower.includes("round") ||
-                             urlLower.includes("announcement");
+    const response = await fetch(
+      `https://serpapi.com/search.json?` + new URLSearchParams({
+        q: query,
+        api_key: serpApiKey,
+        hl: "en",
+        gl: "us",
+        num: "10" // Get more results for better filtering
+      })
+    );
 
-  return hasPressReleaseDomain || (hasCompanyName && hasFundingKeywords);
+    if (!response.ok) {
+      throw new Error(`SERP API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const results = data.organic_results || [];
+    
+    // Filter out existing URLs and validate new ones
+    const newUrls = results
+      .map((result: any) => result.link)
+      .filter((url: string) => !existingUrls.includes(url));
+    
+    const validatedNewUrls = await validateAndAnalyzeUrls(newUrls, record.company_name);
+    
+    return {
+      urls: validatedNewUrls.slice(0, count)
+    };
+  } catch (error) {
+    console.error("❌ SERP search failed:", error);
+    return {urls: []};
+  }
+}
+
+/**
+ * Checks if we have all required information:
+ * - 3 valid URLs
+ * - Valid amount raised
+ * - Valid investor contacts
+ */
+function isEnrichmentComplete(
+  urls: string[], 
+  amount: string, 
+  investorContacts: string
+): boolean {
+  return (
+    urls.length === 3 && 
+    amount !== "N/A" && 
+    investorContacts !== "N/A"
+  );
+}
+
+/**
+ * Final attempt using GPT-4 to fill any missing information.
+ * Uses current partial results as context.
+ */
+async function tryFinalGPT4Attempt(
+  record: FundraiseData,
+  currentUrls: string[],
+  currentAmount: string,
+  currentInvestors: string
+): Promise<{
+  urls: string[];
+  investor_contacts: string;
+  amount_raised: string;
+}> {
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!openaiApiKey) {
+    return {
+      urls: [],
+      investor_contacts: "N/A",
+      amount_raised: "N/A"
+    };
+  }
+
+  const prompt = `Final attempt to complete missing information for ${record.company_name}'s funding round.
+
+Current Information:
+- URLs found: ${currentUrls.join(", ")}
+- Amount raised: ${currentAmount}
+- Investor contacts: ${currentInvestors}
+
+Company: ${record.company_name}
+Known Investors: ${record.investors || 'Unknown'}
+Date: ${record.date_raised || 'Recent'}
+
+Task: Fill in any missing information:
+1. If fewer than 3 URLs: Find additional relevant press release URLs
+2. If amount is N/A: Determine the funding amount
+3. If investor contacts are N/A: Identify specific investors
+
+Use your knowledge of the venture capital industry and recent funding rounds.
+Provide high-confidence information only.
+
+Return in JSON format:
+{
+  "urls": ["url1", "url2", "url3"],
+  "investor_contacts": "Name (Role, Firm), Name2 (Role, Firm2)",
+  "amount_raised": "$X million",
+  "confidence_score": 0.9
+}`;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4",
+        messages: [
+          {
+            role: "system",
+            content: "You are an expert in venture capital research. Provide only high-confidence information to complete the missing data."
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 800,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const result = JSON.parse(data.choices[0]?.message?.content || "{}");
+    
+    console.log("🤖 GPT-4 Final Attempt Result:", result);
+    
+    if (result.confidence_score && result.confidence_score >= 0.8) {
+      return {
+        urls: result.urls || [],
+        investor_contacts: result.investor_contacts || "N/A",
+        amount_raised: result.amount_raised || "N/A"
+      };
+    } else {
+      console.log("⚠️ Low confidence in GPT-4 results, keeping existing values");
+      return {
+        urls: [],
+        investor_contacts: "N/A",
+        amount_raised: "N/A"
+      };
+    }
+  } catch (error) {
+    console.error("❌ GPT-4 final attempt failed:", error);
+    return {
+      urls: [],
+      investor_contacts: "N/A",
+      amount_raised: "N/A"
+    };
+  }
 }
 
 async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
   console.log("\n📑 Extracting content from URLs...");
-  
+
   // Collect content from all URLs
   const urlContents: string[] = [];
   for (const url of urls) {
@@ -370,7 +537,7 @@ async function extractDataFromUrls(urls: string[], record: FundraiseData): Promi
       investor_contacts: "N/A",
       amount_raised: record.amount_raised || "N/A",
       urls: urls
-    };
+  };
   }
 }
 
@@ -541,50 +708,50 @@ ${text.slice(0, 6000)}
 
 Return ONLY the formatted investor names:`;
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "llama3-8b-8192",
-      messages: [
-        {
-          role: "system",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "llama3-8b-8192",
+        messages: [
+          {
+            role: "system",
           content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 300,
-    }),
-  });
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 300,
+      }),
+    });
 
-  if (!response.ok) {
+    if (!response.ok) {
     if (response.status === 429) {
       throw new Error("Rate limit");
     }
-    throw new Error(`Groq API error: ${response.status}`);
-  }
+      throw new Error(`Groq API error: ${response.status}`);
+    }
 
-  const data = await response.json();
-  const result = data.choices[0]?.message?.content || "N/A";
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content || "N/A";
 
-  if (
-    result.toLowerCase().includes("n/a") ||
-    result.toLowerCase().includes("no individual") ||
-    result.toLowerCase().includes("not found") ||
+    if (
+      result.toLowerCase().includes("n/a") ||
+      result.toLowerCase().includes("no individual") ||
+      result.toLowerCase().includes("not found") ||
     !result.includes("(") ||
-    result.trim().length < 5
-  ) {
-    return "N/A";
-  }
+      result.trim().length < 5
+    ) {
+      return "N/A";
+    }
 
-  return result.trim();
+    return result.trim();
 }
 
 async function tryOpenAIExtraction(
