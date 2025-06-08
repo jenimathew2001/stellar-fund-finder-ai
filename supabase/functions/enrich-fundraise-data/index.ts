@@ -85,18 +85,21 @@ serve(async (req) => {
  */
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
   console.log(`\n📋 Processing: ${record.company_name}`);
+  console.log("----------------------------------------");
   
   // Step 1: Get initial URLs from GPT-4
-  console.log("🤖 Step 1: Getting URLs from GPT-4...");
+  console.log("\n🤖 STEP 1: Getting URLs from GPT-4");
+  console.log("----------------------------------------");
   const gptResult = await tryGPT4Initial(record);
+  console.log(`Found ${gptResult.urls.length} URLs from GPT-4`);
   
   // Step 2: Validate each URL from GPT-4
-  console.log("\n🔍 Step 2: Validating GPT-4 URLs...");
+  console.log("\n🔍 STEP 2: Validating GPT-4 URLs");
+  console.log("----------------------------------------");
   const validUrls: string[] = [];
-  const invalidCount = gptResult.urls.length;
   
   for (const url of gptResult.urls) {
-    console.log(`Checking URL: ${url}`);
+    console.log(`\nChecking URL: ${url}`);
     const isValid = await validateSingleUrl(url, record.company_name);
     if (isValid) {
       console.log("✅ URL is valid and relevant");
@@ -105,39 +108,72 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
       console.log("❌ URL is invalid or irrelevant");
     }
   }
+  console.log(`\nValidation summary: ${validUrls.length}/${gptResult.urls.length} URLs valid`);
 
-  let finalUrls: string[] = validUrls;
+  let finalUrls = validUrls;
 
-  // Step 3: If any URLs are invalid, use SERP to find replacements
+  // Step 3: If we don't have 3 valid URLs, try SERP
   if (validUrls.length < 3) {
+    console.log("\n🔎 STEP 3: Getting additional URLs from SERP");
+    console.log("----------------------------------------");
     const neededUrls = 3 - validUrls.length;
-    console.log(`\n🔎 Step 3: Need ${neededUrls} more valid URLs, trying SERP...`);
+    console.log(`Need ${neededUrls} more valid URLs`);
     
-    const serpResult = await trySerpForRemaining(record, neededUrls * 3, validUrls); // Get 3x needed to have enough after validation
-    console.log(`Found ${serpResult.urls.length} URLs from SERP, validating...`);
-    
-    // Validate SERP URLs
-    const validSerpUrls: string[] = [];
-    for (const url of serpResult.urls) {
-      if (validSerpUrls.length >= neededUrls) break; // Stop once we have enough
-      
-      console.log(`Checking SERP URL: ${url}`);
-      const isValid = await validateSingleUrl(url, record.company_name);
-      if (isValid && !validUrls.includes(url)) {
-        console.log("✅ SERP URL is valid and relevant");
-        validSerpUrls.push(url);
-      } else {
-        console.log("❌ SERP URL is invalid or duplicate");
+    let serpUrls: string[] = [];
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    while (serpUrls.length < neededUrls && retryCount < maxRetries) {
+      try {
+        const serpResult = await trySerpForRemaining(record, neededUrls * 2, validUrls);
+        console.log(`Found ${serpResult.urls.length} URLs from SERP, validating...`);
+        
+        // Validate each SERP URL
+        for (const url of serpResult.urls) {
+          if (serpUrls.length >= neededUrls) break;
+          
+          console.log(`\nChecking SERP URL: ${url}`);
+          const isValid = await validateSingleUrl(url, record.company_name);
+          if (isValid && !validUrls.includes(url) && !serpUrls.includes(url)) {
+            console.log("✅ SERP URL is valid and relevant");
+            serpUrls.push(url);
+          } else {
+            console.log("❌ SERP URL is invalid, irrelevant, or duplicate");
+          }
+        }
+
+        if (serpUrls.length >= neededUrls) break;
+        retryCount++;
+        
+        if (retryCount < maxRetries) {
+          console.log(`\nNeed ${neededUrls - serpUrls.length} more URLs, retrying SERP (attempt ${retryCount + 1}/${maxRetries})...`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s between retries
+        }
+      } catch (error) {
+        console.error(`SERP attempt ${retryCount + 1} failed:`, error);
+        retryCount++;
+        if (retryCount < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
       }
     }
-    
-    finalUrls = [...validUrls, ...validSerpUrls];
+
+    finalUrls = [...validUrls, ...serpUrls];
+    console.log(`\nSERP summary: Found ${serpUrls.length} additional valid URLs`);
   }
 
   // Step 4: Extract information from valid URLs
   if (finalUrls.length === 3) {
-    console.log("\n📑 Step 4: Extracting information from all valid URLs...");
+    console.log("\n📑 STEP 4: Extracting information from URLs");
+    console.log("----------------------------------------");
+    console.log("Processing URLs:");
+    finalUrls.forEach((url, index) => console.log(`${index + 1}. ${url}`));
+    
     const extractedData = await extractDataFromUrls(finalUrls, record);
+    
+    console.log("\nExtraction Results:");
+    console.log(`Amount Raised: ${extractedData.amount_raised}`);
+    console.log(`Investor Contacts: ${extractedData.investor_contacts}`);
     
     return {
       press_url_1: finalUrls[0],
@@ -149,7 +185,10 @@ async function enrichRecordData(record: FundraiseData): Promise<Partial<Fundrais
   }
 
   // If we couldn't get 3 valid URLs
-  console.log("\n⚠️ Could not find 3 valid URLs, returning partial data");
+  console.log("\n⚠️ Could not find 3 valid URLs");
+  console.log("----------------------------------------");
+  console.log(`Total valid URLs found: ${finalUrls.length}`);
+  
   return {
     press_url_1: finalUrls[0] || "N/A",
     press_url_2: finalUrls[1] || "N/A",
@@ -284,59 +323,82 @@ async function trySerpForRemaining(
 ): Promise<{urls: string[]}> {
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) {
-    console.error("❌ SERP_API_KEY not configured");
-    return {urls: []};
+    throw new Error("SERP_API_KEY not configured");
   }
 
-  try {
-    const query = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com OR site:techcrunch.com`;
-    console.log(`SERP query: "${query}"`);
+  // Try different search queries for better results
+  const searchQueries = [
+    `"${record.company_name}" funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`,
+    `"${record.company_name}" raises funding ${record.date_raised}`,
+    `"${record.company_name}" investment announcement ${record.date_raised} site:techcrunch.com OR site:reuters.com`
+  ];
 
-    const response = await fetch(
-      `https://serpapi.com/search.json?` + new URLSearchParams({
-        q: query,
-        api_key: serpApiKey,
-        hl: "en",
-        gl: "us",
-        num: count.toString()
-      })
-    );
+  for (const query of searchQueries) {
+    try {
+      console.log(`Trying SERP query: "${query}"`);
 
-    if (!response.ok) {
-      throw new Error(`SERP API error: ${response.status}`);
+      const response = await fetch(
+        `https://serpapi.com/search.json?` + new URLSearchParams({
+          q: query,
+          api_key: serpApiKey,
+          hl: "en",
+          gl: "us",
+          num: count.toString()
+        })
+      );
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          throw new Error("SERP API rate limit reached");
+        }
+        throw new Error(`SERP API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const results = data.organic_results || [];
+      
+      // Filter out existing URLs
+      const newUrls = results
+        .map((result: any) => result.link)
+        .filter((url: string) => !existingUrls.includes(url));
+      
+      if (newUrls.length > 0) {
+        return { urls: newUrls };
+      }
+    } catch (error) {
+      throw error; // Let the caller handle retries
     }
-
-    const data = await response.json();
-    const results = data.organic_results || [];
-    
-    // Filter out existing URLs
-    const newUrls = results
-      .map((result: any) => result.link)
-      .filter((url: string) => !existingUrls.includes(url));
-    
-    return { urls: newUrls };
-  } catch (error) {
-    console.error("❌ SERP search failed:", error);
-    return {urls: []};
   }
+
+  return { urls: [] };
 }
 
 /**
  * Update extractDataFromUrls to be more concise
  */
 async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+  console.log("\nAttempting data extraction...");
+  
   // First try with Groq
   try {
+    console.log("Trying extraction with Groq...");
     const groqResult = await extractWithGroq(urls, record);
     if (groqResult.investor_contacts !== "N/A" && groqResult.amount_raised !== "N/A") {
+      console.log("✅ Groq extraction successful");
       return groqResult;
     }
+    console.log("⚠️ Groq extraction incomplete, falling back to GPT-4");
   } catch (error) {
     console.log("⚠️ Groq extraction failed, falling back to GPT-4");
   }
 
   // Fallback to GPT-4
-  return extractWithGPT4(urls, record);
+  console.log("Trying extraction with GPT-4...");
+  const gptResult = await extractWithGPT4(urls, record);
+  console.log(gptResult.investor_contacts === "N/A" || gptResult.amount_raised === "N/A" 
+    ? "⚠️ GPT-4 extraction incomplete" 
+    : "✅ GPT-4 extraction successful");
+  return gptResult;
 }
 
 async function extractWithGroq(urls: string[], record: FundraiseData): Promise<ExtractedData> {
