@@ -55,7 +55,9 @@ export const ProcessingStatus = ({
       return;
     }
 
-    console.log(`🚀 Starting enrichment for ${pendingItems.length} pending items`);
+    console.log(
+      `🚀 Starting enrichment for ${pendingItems.length} pending items`
+    );
     let processedCount = 0;
     let updatedData = [...data];
 
@@ -63,7 +65,11 @@ export const ProcessingStatus = ({
       setCurrentProcessingItem(item.company_name);
 
       try {
-        console.log(`📋 Processing: ${item.company_name} (${processedCount + 1}/${pendingItems.length})`);
+        console.log(
+          `📋 Processing: ${item.company_name} (${processedCount + 1}/${
+            pendingItems.length
+          })`
+        );
 
         // Update status to processing immediately
         updatedData = updatedData.map((dataItem) =>
@@ -103,10 +109,12 @@ export const ProcessingStatus = ({
 
           if (result) {
             console.log("📊 Updating local data with enriched record:", result);
-            
+
             // Update with enriched data
             updatedData = updatedData.map((dataItem) =>
-              dataItem.id === item.id ? { ...result, status: "completed" as const } : dataItem
+              dataItem.id === item.id
+                ? { ...result, status: "completed" as const }
+                : dataItem
             );
 
             toast({
@@ -120,9 +128,12 @@ export const ProcessingStatus = ({
         if (onDataUpdate) {
           onDataUpdate([...updatedData]);
         }
-
       } catch (error) {
-        console.error("💥 Unexpected error processing:", item.company_name, error);
+        console.error(
+          "💥 Unexpected error processing:",
+          item.company_name,
+          error
+        );
         toast({
           title: "Unexpected error",
           description: `Failed to process ${item.company_name}`,
@@ -135,25 +146,27 @@ export const ProcessingStatus = ({
             ? { ...dataItem, status: "error" as const }
             : dataItem
         );
-        
+
         if (onDataUpdate) {
           onDataUpdate([...updatedData]);
         }
       }
 
       setProcessed(processedCount);
-      
+
       // Add delay between requests
       if (processedCount < pendingItems.length) {
         console.log("⏳ Waiting 2 seconds before next item...");
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }
 
     setLocalIsProcessing(false);
     setCurrentProcessingItem("");
 
-    console.log(`🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`);
+    console.log(
+      `🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`
+    );
 
     toast({
       title: "Processing complete",
