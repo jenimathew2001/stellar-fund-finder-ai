@@ -55,20 +55,25 @@ export const ProcessingStatus = ({
       return;
     }
 
-    console.log(
-      `🚀 Starting enrichment for ${pendingItems.length} pending items`
-    );
+    console.log(`🚀 Starting enrichment for ${pendingItems.length} pending items`);
     let processedCount = 0;
+    let updatedData = [...data];
 
     for (const item of pendingItems) {
       setCurrentProcessingItem(item.company_name);
 
       try {
-        console.log(
-          `📋 Processing: ${item.company_name} (${processedCount + 1}/${
-            pendingItems.length
-          })`
+        console.log(`📋 Processing: ${item.company_name} (${processedCount + 1}/${pendingItems.length})`);
+
+        // Update status to processing immediately
+        updatedData = updatedData.map((dataItem) =>
+          dataItem.id === item.id
+            ? { ...dataItem, status: "processing" as const }
+            : dataItem
         );
+        if (onDataUpdate) {
+          onDataUpdate([...updatedData]);
+        }
 
         // Call the edge function
         const { data: result, error } = await supabase.functions.invoke(
@@ -86,79 +91,69 @@ export const ProcessingStatus = ({
             variant: "destructive",
           });
 
-          // Update local data to show error status
-          if (onDataUpdate) {
-            const updatedData = data.map((dataItem) =>
-              dataItem.id === item.id
-                ? { ...dataItem, status: "error" as const }
-                : dataItem
-            );
-            onDataUpdate(updatedData);
-          }
+          // Update to error status
+          updatedData = updatedData.map((dataItem) =>
+            dataItem.id === item.id
+              ? { ...dataItem, status: "error" as const }
+              : dataItem
+          );
         } else {
           console.log("✅ Successfully processed:", item.company_name, result);
           processedCount++;
 
-          const updatedRecord = result;
-          // Fetch the updated record from database to get the enriched data
-
-          // Update the local data with the enriched record
-          if (onDataUpdate && updatedRecord) {
-            const typedRecord: FundraiseData = updatedRecord;
-
-            console.log(
-              "📊 Updating local data with enriched record:",
-              typedRecord
+          if (result) {
+            console.log("📊 Updating local data with enriched record:", result);
+            
+            // Update with enriched data
+            updatedData = updatedData.map((dataItem) =>
+              dataItem.id === item.id ? { ...result, status: "completed" as const } : dataItem
             );
 
-            data = data.map((dataItem) =>
-              dataItem.id === item.id ? typedRecord : dataItem
-            );
-            onDataUpdate(data);
+            toast({
+              title: "Item processed",
+              description: `Successfully processed ${item.company_name}`,
+            });
           }
-
-          toast({
-            title: "Item processed",
-            description: `Successfully processed ${item.company_name}`,
-          });
         }
+
+        // Update the data immediately after each item
+        if (onDataUpdate) {
+          onDataUpdate([...updatedData]);
+        }
+
       } catch (error) {
-        console.error(
-          "💥 Unexpected error processing:",
-          item.company_name,
-          error
-        );
+        console.error("💥 Unexpected error processing:", item.company_name, error);
         toast({
           title: "Unexpected error",
           description: `Failed to process ${item.company_name}`,
           variant: "destructive",
         });
 
-        // Update local data to show error status
+        // Update to error status
+        updatedData = updatedData.map((dataItem) =>
+          dataItem.id === item.id
+            ? { ...dataItem, status: "error" as const }
+            : dataItem
+        );
+        
         if (onDataUpdate) {
-          const updatedData = data.map((dataItem) =>
-            dataItem.id === item.id
-              ? { ...dataItem, status: "error" as const }
-              : dataItem
-          );
-          onDataUpdate(updatedData);
+          onDataUpdate([...updatedData]);
         }
       }
 
       setProcessed(processedCount);
-      // Add delay between requests to avoid overwhelming the system
-      if (processedCount < pendingItems.length - 1) {
-        console.log("⏳ Waiting 1 seconds before next item...");
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+      
+      // Add delay between requests
+      if (processedCount < pendingItems.length) {
+        console.log("⏳ Waiting 2 seconds before next item...");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
 
     setLocalIsProcessing(false);
     setCurrentProcessingItem("");
 
-    console.log(
-      `🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`
-    );
+    console.log(`🎉 Processing complete: ${processedCount}/${pendingItems.length} successful`);
 
     toast({
       title: "Processing complete",

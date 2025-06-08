@@ -54,10 +54,11 @@ export const DataTable = ({ data }: DataTableProps) => {
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        className="text-blue-400 hover:text-blue-300 text-xs flex items-center gap-1"
+        className="text-blue-400 hover:text-blue-300 text-xs flex items-center gap-1 max-w-[120px] truncate"
+        title={url}
       >
-        <ExternalLink className="h-3 w-3" />
-        Link {index}
+        <ExternalLink className="h-3 w-3 flex-shrink-0" />
+        Press {index}
       </a>
     );
   };
@@ -67,11 +68,11 @@ export const DataTable = ({ data }: DataTableProps) => {
       'Company Name',
       'Date Raised',
       'Amount Raised',
-      'Investors',
+      'Original Investors',
       'Press URL 1',
       'Press URL 2',
       'Press URL 3',
-      'Investor Contacts',
+      'Investor Names',
       'Status'
     ];
 
@@ -118,11 +119,11 @@ export const DataTable = ({ data }: DataTableProps) => {
             <TableRow className="border-gray-700">
               <TableHead className="text-gray-300 min-w-[150px]">Company</TableHead>
               <TableHead className="text-gray-300">Date</TableHead>
-              <TableHead className="text-gray-300">Amount</TableHead>
-              <TableHead className="text-gray-300 min-w-[150px]">Investors</TableHead>
-              <TableHead className="text-gray-300">Press URL 1</TableHead>
-              <TableHead className="text-gray-300">Press URL 2</TableHead>
-              <TableHead className="text-gray-300">Press URL 3</TableHead>
+              <TableHead className="text-gray-300">Amount Raised</TableHead>
+              <TableHead className="text-gray-300 min-w-[150px]">Original Investors</TableHead>
+              <TableHead className="text-gray-300 min-w-[120px]">Press URL 1</TableHead>
+              <TableHead className="text-gray-300 min-w-[120px]">Press URL 2</TableHead>
+              <TableHead className="text-gray-300 min-w-[120px]">Press URL 3</TableHead>
               <TableHead className="text-gray-300 min-w-[200px]">Investor Names</TableHead>
               <TableHead className="text-gray-300">Status</TableHead>
             </TableRow>
@@ -134,7 +135,9 @@ export const DataTable = ({ data }: DataTableProps) => {
                   {row.company_name}
                 </TableCell>
                 <TableCell className="text-gray-300">{row.date_raised}</TableCell>
-                <TableCell className="text-gray-300">{row.amount_raised}</TableCell>
+                <TableCell className="text-gray-300 font-medium">
+                  {row.amount_raised}
+                </TableCell>
                 <TableCell className="text-gray-300 max-w-xs truncate">
                   {row.investors}
                 </TableCell>
@@ -149,9 +152,9 @@ export const DataTable = ({ data }: DataTableProps) => {
                 </TableCell>
                 <TableCell className="text-gray-300 max-w-xs">
                   {row.investor_contacts && row.investor_contacts !== 'N/A' ? (
-                    <div className="text-xs">
-                      {row.investor_contacts.length > 100 
-                        ? `${row.investor_contacts.substring(0, 100)}...`
+                    <div className="text-xs leading-relaxed">
+                      {row.investor_contacts.length > 150 
+                        ? `${row.investor_contacts.substring(0, 150)}...`
                         : row.investor_contacts
                       }
                     </div>
