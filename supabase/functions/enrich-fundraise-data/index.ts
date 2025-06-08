@@ -1,4 +1,3 @@
-
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
@@ -100,71 +99,64 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     return {success: false, urls: []};
   }
 
-  // Format date for search
-  let searchYear = "";
-  if (record.date_raised) {
-    const dateMatch = record.date_raised.match(/\d{4}/);
-    if (dateMatch) {
-      searchYear = dateMatch[0];
-    } else if (!isNaN(Number(record.date_raised))) {
-      const excelDate = new Date((Number(record.date_raised) - 25569) * 86400 * 1000);
-      searchYear = excelDate.getFullYear().toString();
-    }
-  }
-
-  // More targeted search queries for press releases
-  const searchQueries = [
-    `"${record.company_name}" "funding" "press release" ${searchYear} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com`,
-    `"${record.company_name}" "raises" "million" "funding" ${searchYear}`,
-    `"${record.company_name}" "investment" "round" ${searchYear} site:techcrunch.com OR site:venturebeat.com`,
-    `"${record.company_name}" "${record.investors}" "funding" "announcement"`,
-  ];
-
-  let allUrls: string[] = [];
-  
-  for (let i = 0; i < Math.min(searchQueries.length, 3); i++) {
-    try {
-      console.log(`🔍 SERP search ${i + 1}: "${searchQueries[i]}"`);
-      
-      const response = await fetch(
-        `https://serpapi.com/search?q=${encodeURIComponent(searchQueries[i])}&api_key=${serpApiKey}&num=5&engine=google&hl=en&gl=us`
-      );
-
-      if (!response.ok) {
-        console.error(`❌ SERP API error: ${response.status}`);
-        continue;
+  try {
+    // Format date if available
+    let dateStr = "";
+    if (record.date_raised && record.date_raised !== "Not specified") {
+      const date = new Date(record.date_raised);
+      if (!isNaN(date.getTime())) {
+        dateStr = date.getFullYear().toString();
       }
-
-      const data = await response.json();
-      const organicResults = data.organic_results || [];
-      
-      console.log(`📊 Found ${organicResults.length} results`);
-
-      const urls = organicResults
-        .map((result: any) => result.link)
-        .filter((url: string) => url && isPressReleaseUrl(url, record.company_name))
-        .slice(0, 2);
-
-      console.log(`✅ Filtered URLs: ${urls}`);
-      allUrls.push(...urls);
-      
-      // Wait between requests to avoid rate limits
-      if (i < searchQueries.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } catch (error) {
-      console.error(`❌ SERP search ${i + 1} failed:`, error);
     }
-  }
 
-  // Remove duplicates and take top 3
-  const uniqueUrls = [...new Set(allUrls)].slice(0, 3);
-  console.log(`📋 Final SERP URLs: ${uniqueUrls}`);
-  
-  return {
-    success: uniqueUrls.length > 0,
-    urls: uniqueUrls
-  };
+    // Construct a simple, direct query
+    const query = `${record.company_name} funding press release ${dateStr}`.trim();
+    console.log(`🔍 Searching with query: "${query}"`);
+
+    const response = await fetch(
+      `https://serpapi.com/search?q=${encodeURIComponent(query)}&api_key=${serpApiKey}&num=10&engine=google&hl=en&gl=us`
+    );
+
+    if (!response.ok) {
+      throw new Error(`SERP API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const organicResults = data.organic_results || [];
+    
+    console.log(`📊 Found ${organicResults.length} results`);
+
+    // Filter for press release URLs
+    const pressReleaseDomains = [
+      "businesswire.com",
+      "prnewswire.com", 
+      "globenewswire.com",
+      "techcrunch.com",
+      "venturebeat.com",
+      "reuters.com",
+      "bloomberg.com",
+      "yahoo.com/finance",
+      "benzinga.com",
+    ];
+
+    const urls = organicResults
+      .filter((result: any) => {
+        const url = result.link.toLowerCase();
+        return pressReleaseDomains.some(domain => url.includes(domain));
+      })
+      .map((result: any) => result.link)
+      .slice(0, 3);
+
+    console.log(`✅ Found press release URLs:`, urls);
+    
+    return {
+      success: urls.length > 0,
+      urls: urls
+    };
+  } catch (error) {
+    console.error("❌ SERP search failed:", error);
+    return {success: false, urls: []};
+  }
 }
 
 function isPressReleaseUrl(url: string, companyName: string): boolean {
@@ -329,24 +321,28 @@ async function extractInvestorNamesWithLLM(
     return "N/A";
   }
 
-  const prompt = `You are extracting investor contact information from a funding announcement about ${companyName}.
+  const prompt = `Extract investor information from this press release about ${companyName}'s funding round.
 
-TASK: Find the INDIVIDUAL PEOPLE who represent the INVESTOR FIRMS in this funding round.
+CONTEXT:
+Company: ${companyName}
+Known Investors: ${knownInvestors}
 
-REQUIREMENTS:
-- Extract FULL NAMES of individual people (not companies)
-- Format as: "FirstName LastName (Firm Name)"
-- Example: "Brayton Williams (Boost VC), Nicole Velho (Sie Ventures)"
-- Only include partners, managing directors, principals at VC firms
-- Do NOT include company executives or employees of ${companyName}
+TASK:
+1. Find INDIVIDUAL PEOPLE who are investors or represent investment firms
+2. Include their full names and associated firms
+3. Focus on lead investors, partners, managing directors, and key decision-makers
+4. DO NOT include employees or executives of ${companyName}
+
+FORMAT:
+- Return names as: "Full Name (Firm Name)"
+- Separate multiple investors with commas
+- Example: "John Smith (Acme Ventures), Jane Doe (XYZ Capital)"
 - If no individual names found, return "N/A"
 
-Known investor firms: ${knownInvestors}
-
-ARTICLE TEXT:
+PRESS RELEASE TEXT:
 ${text.slice(0, 6000)}
 
-Return only the formatted names:`;
+Return ONLY the formatted investor names:`;
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -360,7 +356,7 @@ Return only the formatted names:`;
         messages: [
           {
             role: "system",
-            content: "You extract individual investor names from press releases. Format as 'Name (Firm)'. Return 'N/A' if no individual names found.",
+            content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
           },
           {
             role: "user",
@@ -379,13 +375,14 @@ Return only the formatted names:`;
     const data = await response.json();
     const result = data.choices[0]?.message?.content || "N/A";
 
-    console.log("🤖 LLM Investor Names Result:", result);
+    console.log("🤖 Extracted investor names:", result);
 
-    // Validate and clean result
+    // Validate the result format
     if (
       result.toLowerCase().includes("n/a") ||
       result.toLowerCase().includes("no individual") ||
       result.toLowerCase().includes("not found") ||
+      !result.includes("(") || // Must have parentheses for firm names
       result.trim().length < 5
     ) {
       return "N/A";
