@@ -84,56 +84,78 @@ serve(async (req) => {
  * 5. Final GPT-4 attempt if any information is missing
  */
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
-  console.log(`\n🚀 Starting enrichment for ${record.company_name}`);
+  console.log(`\n📋 Processing: ${record.company_name}`);
   
-  // Step 1: Try GPT-4 first for all information
-  console.log("\n🤖 Attempting GPT-4 for initial data gathering...");
+  // Step 1: Get initial URLs from GPT-4
+  console.log("🤖 Step 1: Getting URLs from GPT-4...");
   const gptResult = await tryGPT4Initial(record);
   
-  // Step 2: Validate URLs from GPT-4
-  console.log("\n🔍 Validating GPT-4 provided URLs...");
-  const validatedUrls = await validateAndAnalyzeUrls(gptResult.urls, record.company_name);
+  // Step 2: Validate each URL from GPT-4
+  console.log("\n🔍 Step 2: Validating GPT-4 URLs...");
+  const validUrls: string[] = [];
+  const invalidCount = gptResult.urls.length;
   
-  let finalUrls = validatedUrls;
-  let finalInvestorContacts = gptResult.investor_contacts;
-  let finalAmount = gptResult.amount_raised;
-
-  // Step 3: If not enough valid URLs, use SERP to find more
-  if (validatedUrls.length < 3) {
-    console.log(`\n⚠️ Only found ${validatedUrls.length} valid URLs from GPT-4, trying SERP for more...`);
-    const remainingCount = 3 - validatedUrls.length;
-    const serpResult = await trySerpForRemaining(record, remainingCount, validatedUrls);
-    finalUrls = [...validatedUrls, ...serpResult.urls].slice(0, 3); // Ensure max 3 URLs
-  }
-
-  // Step 4: Extract information from valid URLs if needed
-  if (finalUrls.length > 0 && (finalAmount === "N/A" || finalInvestorContacts === "N/A")) {
-    console.log("\n📑 Extracting information from validated URLs...");
-    const extractedData = await extractDataFromUrls(finalUrls, record);
-    
-    if (finalAmount === "N/A") finalAmount = extractedData.amount_raised;
-    if (finalInvestorContacts === "N/A") finalInvestorContacts = extractedData.investor_contacts;
-  }
-
-  // Step 5: Final validation and GPT-4 attempt if needed
-  if (!isEnrichmentComplete(finalUrls, finalAmount, finalInvestorContacts)) {
-    console.log("\n⚠️ Enrichment incomplete, trying one final GPT-4 attempt...");
-    const finalAttempt = await tryFinalGPT4Attempt(record, finalUrls, finalAmount, finalInvestorContacts);
-    
-    if (finalAmount === "N/A") finalAmount = finalAttempt.amount_raised;
-    if (finalInvestorContacts === "N/A") finalInvestorContacts = finalAttempt.investor_contacts;
-    if (finalUrls.length < 3) {
-      const newUrls = await validateAndAnalyzeUrls(finalAttempt.urls, record.company_name);
-      finalUrls = [...new Set([...finalUrls, ...newUrls])].slice(0, 3);
+  for (const url of gptResult.urls) {
+    console.log(`Checking URL: ${url}`);
+    const isValid = await validateSingleUrl(url, record.company_name);
+    if (isValid) {
+      console.log("✅ URL is valid and relevant");
+      validUrls.push(url);
+    } else {
+      console.log("❌ URL is invalid or irrelevant");
     }
   }
 
+  let finalUrls: string[] = validUrls;
+
+  // Step 3: If any URLs are invalid, use SERP to find replacements
+  if (validUrls.length < 3) {
+    const neededUrls = 3 - validUrls.length;
+    console.log(`\n🔎 Step 3: Need ${neededUrls} more valid URLs, trying SERP...`);
+    
+    const serpResult = await trySerpForRemaining(record, neededUrls * 3, validUrls); // Get 3x needed to have enough after validation
+    console.log(`Found ${serpResult.urls.length} URLs from SERP, validating...`);
+    
+    // Validate SERP URLs
+    const validSerpUrls: string[] = [];
+    for (const url of serpResult.urls) {
+      if (validSerpUrls.length >= neededUrls) break; // Stop once we have enough
+      
+      console.log(`Checking SERP URL: ${url}`);
+      const isValid = await validateSingleUrl(url, record.company_name);
+      if (isValid && !validUrls.includes(url)) {
+        console.log("✅ SERP URL is valid and relevant");
+        validSerpUrls.push(url);
+      } else {
+        console.log("❌ SERP URL is invalid or duplicate");
+      }
+    }
+    
+    finalUrls = [...validUrls, ...validSerpUrls];
+  }
+
+  // Step 4: Extract information from valid URLs
+  if (finalUrls.length === 3) {
+    console.log("\n📑 Step 4: Extracting information from all valid URLs...");
+    const extractedData = await extractDataFromUrls(finalUrls, record);
+    
+    return {
+      press_url_1: finalUrls[0],
+      press_url_2: finalUrls[1],
+      press_url_3: finalUrls[2],
+      investor_contacts: extractedData.investor_contacts,
+      amount_raised: extractedData.amount_raised
+    };
+  }
+
+  // If we couldn't get 3 valid URLs
+  console.log("\n⚠️ Could not find 3 valid URLs, returning partial data");
   return {
     press_url_1: finalUrls[0] || "N/A",
     press_url_2: finalUrls[1] || "N/A",
     press_url_3: finalUrls[2] || "N/A",
-    investor_contacts: finalInvestorContacts,
-    amount_raised: finalAmount
+    investor_contacts: "N/A",
+    amount_raised: "N/A"
   };
 }
 
@@ -152,33 +174,21 @@ async function tryGPT4Initial(record: FundraiseData): Promise<{
     return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
   }
 
-  const prompt = `Find accurate information about ${record.company_name}'s funding round.
+  const prompt = `Find press release URLs for ${record.company_name}'s funding round.
 
 Company: ${record.company_name}
-Known Investors: ${record.investors || 'Unknown'}
 Date: ${record.date_raised || 'Recent'}
+Known Investors: ${record.investors || 'Unknown'}
 
-Tasks:
-1. Find 3 most relevant press release or news URLs about this funding round
-   - Focus on official press releases, major tech news sites, or financial news
-   - Ensure URLs are specific to this company and funding round
-   - Prioritize: businesswire.com, prnewswire.com, globenewswire.com, techcrunch.com, reuters.com
-
-2. Identify individual investors or investment firm representatives
-   - Find specific people who led or participated in the investment
-   - Include their roles and firms
-   - Format as: "Full Name (Role, Firm)"
-
-3. Determine the exact funding amount raised
-   - Include currency symbol
-   - Use standard format like "$100 million" or "€50M"
+Task:
+Find 3 most relevant press release URLs about this funding round.
+- Focus on official press releases and major news sites
+- Ensure URLs are specific to this company and this funding round
+- Prioritize: businesswire.com, prnewswire.com, globenewswire.com, techcrunch.com, reuters.com
 
 Return in JSON format:
 {
-  "urls": ["url1", "url2", "url3"],
-  "investor_contacts": "Name (Role, Firm), Name2 (Role, Firm2)",
-  "amount_raised": "$X million",
-  "confidence_score": 0.9
+  "urls": ["url1", "url2", "url3"]
 }`;
 
   try {
@@ -193,7 +203,7 @@ Return in JSON format:
         messages: [
           {
             role: "system",
-            content: "You are an expert in venture capital research. Provide accurate, verified information only."
+            content: "You are an expert in finding accurate press releases about startup funding rounds."
           },
           {
             role: "user",
@@ -201,7 +211,7 @@ Return in JSON format:
           },
         ],
         temperature: 0.1,
-        max_tokens: 800,
+        max_tokens: 500,
       }),
     });
 
@@ -212,85 +222,55 @@ Return in JSON format:
     const data = await response.json();
     const result = JSON.parse(data.choices[0]?.message?.content || "{}");
     
-    console.log("🤖 GPT-4 Initial Result:", result);
-    
-    // Only accept results with high confidence
-    if (result.confidence_score && result.confidence_score >= 0.8) {
-      return {
-        urls: result.urls || [],
-        investor_contacts: result.investor_contacts || "N/A",
-        amount_raised: result.amount_raised || "N/A"
-      };
-    } else {
-      console.log("⚠️ Low confidence in GPT-4 results, treating as N/A");
-      return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
-    }
+    return {
+      urls: result.urls || [],
+      investor_contacts: "N/A", // We'll get this from URL content later
+      amount_raised: "N/A" // We'll get this from URL content later
+    };
   } catch (error) {
-    console.error("❌ GPT-4 initial attempt failed:", error);
+    console.error("❌ GPT-4 URL search failed:", error);
     return { urls: [], investor_contacts: "N/A", amount_raised: "N/A" };
   }
 }
 
 /**
- * Validates URLs by checking their content for relevance.
- * A URL is considered valid if:
- * 1. Content is accessible
- * 2. Contains the company name
- * 3. Has enough funding-related keywords
- * 4. Comes from reputable sources
+ * Validates a single URL by checking its content
  */
-async function validateAndAnalyzeUrls(urls: string[], companyName: string): Promise<string[]> {
-  const validUrls: {url: string; relevanceScore: number}[] = [];
-  
-  for (const url of urls) {
-    try {
-      console.log(`\n🔍 Validating URL: ${url}`);
-      const content = await fetchUrlContent(url);
-      
-      if (!content) {
-        console.log('⚠️ No content found');
-        continue;
-      }
+async function validateSingleUrl(url: string, companyName: string): Promise<boolean> {
+  try {
+    const content = await fetchUrlContent(url);
+    if (!content) return false;
 
-      const companyNameLower = companyName.toLowerCase();
-      const contentLower = content.toLowerCase();
-      
-      if (!contentLower.includes(companyNameLower)) {
-        console.log('⚠️ Company name not found in content');
-        continue;
-      }
-
-      // Calculate relevance score based on keywords and source
-      let relevanceScore = 0;
-      const fundingKeywords = ['funding', 'investment', 'raises', 'raised', 'round', 'capital'];
-      const foundKeywords = fundingKeywords.filter(keyword => 
-        contentLower.includes(keyword.toLowerCase())
-      );
-
-      relevanceScore = foundKeywords.length;
-
-      // Boost score for reputable sources
-      if (url.includes('press-release') || url.includes('news')) relevanceScore += 1;
-      if (/businesswire\.com|prnewswire\.com|globenewswire\.com/.test(url)) relevanceScore += 2;
-      if (/techcrunch\.com|reuters\.com|bloomberg\.com/.test(url)) relevanceScore += 1;
-
-      if (relevanceScore >= 2) {
-        console.log(`✅ Valid URL found! Relevance score: ${relevanceScore}`);
-        validUrls.push({url, relevanceScore});
-      } else {
-        console.log(`⚠️ URL failed relevance check (score: ${relevanceScore})`);
-      }
-    } catch (error) {
-      console.log(`❌ Error validating URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    const companyNameLower = companyName.toLowerCase();
+    const contentLower = content.toLowerCase();
+    
+    // Must contain company name
+    if (!contentLower.includes(companyNameLower)) {
+      console.log('Company name not found in content');
+      return false;
     }
-  }
 
-  // Return unique URLs sorted by relevance
-  return Array.from(new Set(
-    validUrls
-      .sort((a, b) => b.relevanceScore - a.relevanceScore)
-      .map(item => item.url)
-  ));
+    // Must contain funding keywords
+    const fundingKeywords = ['funding', 'investment', 'raises', 'raised', 'round', 'capital'];
+    const foundKeywords = fundingKeywords.filter(keyword => 
+      contentLower.includes(keyword.toLowerCase())
+    );
+
+    // Calculate relevance score
+    let score = foundKeywords.length;
+    if (url.includes('press-release') || url.includes('news')) score += 1;
+    if (/businesswire\.com|prnewswire\.com|globenewswire\.com/.test(url)) score += 2;
+    if (/techcrunch\.com|reuters\.com|bloomberg\.com/.test(url)) score += 1;
+
+    const isValid = score >= 2;
+    if (!isValid) {
+      console.log(`Not enough relevance indicators (score: ${score})`);
+    }
+    return isValid;
+  } catch (error) {
+    console.log('Error fetching or processing URL:', error instanceof Error ? error.message : 'Unknown error');
+    return false;
+  }
 }
 
 /**
@@ -310,7 +290,7 @@ async function trySerpForRemaining(
 
   try {
     const query = `${record.company_name} funding press release ${record.date_raised} site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com OR site:techcrunch.com`;
-    console.log(`\n🔍 SERP search for remaining URLs: "${query}"`);
+    console.log(`SERP query: "${query}"`);
 
     const response = await fetch(
       `https://serpapi.com/search.json?` + new URLSearchParams({
@@ -318,7 +298,7 @@ async function trySerpForRemaining(
         api_key: serpApiKey,
         hl: "en",
         gl: "us",
-        num: "10" // Get more results for better filtering
+        num: count.toString()
       })
     );
 
@@ -329,16 +309,12 @@ async function trySerpForRemaining(
     const data = await response.json();
     const results = data.organic_results || [];
     
-    // Filter out existing URLs and validate new ones
+    // Filter out existing URLs
     const newUrls = results
       .map((result: any) => result.link)
       .filter((url: string) => !existingUrls.includes(url));
     
-    const validatedNewUrls = await validateAndAnalyzeUrls(newUrls, record.company_name);
-    
-    return {
-      urls: validatedNewUrls.slice(0, count)
-    };
+    return { urls: newUrls };
   } catch (error) {
     console.error("❌ SERP search failed:", error);
     return {urls: []};
@@ -346,71 +322,135 @@ async function trySerpForRemaining(
 }
 
 /**
- * Checks if we have all required information:
- * - 3 valid URLs
- * - Valid amount raised
- * - Valid investor contacts
+ * Update extractDataFromUrls to be more concise
  */
-function isEnrichmentComplete(
-  urls: string[], 
-  amount: string, 
-  investorContacts: string
-): boolean {
-  return (
-    urls.length === 3 && 
-    amount !== "N/A" && 
-    investorContacts !== "N/A"
-  );
-}
-
-/**
- * Final attempt using GPT-4 to fill any missing information.
- * Uses current partial results as context.
- */
-async function tryFinalGPT4Attempt(
-  record: FundraiseData,
-  currentUrls: string[],
-  currentAmount: string,
-  currentInvestors: string
-): Promise<{
-  urls: string[];
-  investor_contacts: string;
-  amount_raised: string;
-}> {
-  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-  if (!openaiApiKey) {
-    return {
-      urls: [],
-      investor_contacts: "N/A",
-      amount_raised: "N/A"
-    };
+async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+  // First try with Groq
+  try {
+    const groqResult = await extractWithGroq(urls, record);
+    if (groqResult.investor_contacts !== "N/A" && groqResult.amount_raised !== "N/A") {
+      return groqResult;
+    }
+  } catch (error) {
+    console.log("⚠️ Groq extraction failed, falling back to GPT-4");
   }
 
-  const prompt = `Final attempt to complete missing information for ${record.company_name}'s funding round.
+  // Fallback to GPT-4
+  return extractWithGPT4(urls, record);
+}
 
-Current Information:
-- URLs found: ${currentUrls.join(", ")}
-- Amount raised: ${currentAmount}
-- Investor contacts: ${currentInvestors}
+async function extractWithGroq(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+  const groqApiKey = Deno.env.get("GROQ_API_KEY");
+  if (!groqApiKey) throw new Error("No Groq API key");
+
+  const contents: string[] = [];
+  for (const url of urls) {
+    try {
+      const content = await fetchUrlContent(url);
+      if (content) contents.push(content);
+    } catch (error) {
+      continue;
+    }
+  }
+
+  if (contents.length === 0) {
+    throw new Error("No content could be extracted from URLs");
+  }
+
+  const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
+  const prompt = `Extract funding information from these articles about ${record.company_name}.
 
 Company: ${record.company_name}
 Known Investors: ${record.investors || 'Unknown'}
-Date: ${record.date_raised || 'Recent'}
 
-Task: Fill in any missing information:
-1. If fewer than 3 URLs: Find additional relevant press release URLs
-2. If amount is N/A: Determine the funding amount
-3. If investor contacts are N/A: Identify specific investors
+Content:
+${combinedContent}
 
-Use your knowledge of the venture capital industry and recent funding rounds.
-Provide high-confidence information only.
+Extract:
+1. Individual investors and their roles (format: "Name (Role, Firm)")
+2. Exact funding amount with currency
 
 Return in JSON format:
 {
-  "urls": ["url1", "url2", "url3"],
-  "investor_contacts": "Name (Role, Firm), Name2 (Role, Firm2)",
-  "amount_raised": "$X million",
-  "confidence_score": 0.9
+  "investor_contacts": "Name1 (Role, Firm1), Name2 (Role, Firm2)",
+  "amount_raised": "$X million"
+}`;
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${groqApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "mixtral-8x7b-32768",
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert at extracting precise funding information from press releases."
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 500,
+    }),
+  });
+
+  if (!response.ok) {
+    if (response.status === 429) throw new Error("Rate limit");
+    throw new Error(`Groq API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const result = JSON.parse(data.choices[0]?.message?.content || "{}");
+
+  return {
+    investor_contacts: result.investor_contacts || "N/A",
+    amount_raised: result.amount_raised || "N/A",
+    urls: urls
+  };
+}
+
+async function extractWithGPT4(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+  const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!openaiApiKey) {
+    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
+  }
+
+  const contents: string[] = [];
+  for (const url of urls) {
+    try {
+      const content = await fetchUrlContent(url);
+      if (content) contents.push(content);
+    } catch (error) {
+      continue;
+    }
+  }
+
+  if (contents.length === 0) {
+    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
+  }
+
+  const combinedContent = contents.join("\n\n=== Next Article ===\n\n");
+  const prompt = `Extract funding information from these articles about ${record.company_name}.
+
+Company: ${record.company_name}
+Known Investors: ${record.investors || 'Unknown'}
+
+Content:
+${combinedContent}
+
+Extract:
+1. Individual investors and their roles (format: "Name (Role, Firm)")
+2. Exact funding amount with currency
+
+Return in JSON format:
+{
+  "investor_contacts": "Name1 (Role, Firm1), Name2 (Role, Firm2)",
+  "amount_raised": "$X million"
 }`;
 
   try {
@@ -425,7 +465,7 @@ Return in JSON format:
         messages: [
           {
             role: "system",
-            content: "You are an expert in venture capital research. Provide only high-confidence information to complete the missing data."
+            content: "You are an expert at extracting precise funding information from press releases."
           },
           {
             role: "user",
@@ -433,7 +473,7 @@ Return in JSON format:
           },
         ],
         temperature: 0.1,
-        max_tokens: 800,
+        max_tokens: 500,
       }),
     });
 
@@ -443,101 +483,15 @@ Return in JSON format:
 
     const data = await response.json();
     const result = JSON.parse(data.choices[0]?.message?.content || "{}");
-    
-    console.log("🤖 GPT-4 Final Attempt Result:", result);
-    
-    if (result.confidence_score && result.confidence_score >= 0.8) {
-      return {
-        urls: result.urls || [],
-        investor_contacts: result.investor_contacts || "N/A",
-        amount_raised: result.amount_raised || "N/A"
-      };
-    } else {
-      console.log("⚠️ Low confidence in GPT-4 results, keeping existing values");
-      return {
-        urls: [],
-        investor_contacts: "N/A",
-        amount_raised: "N/A"
-      };
-    }
-  } catch (error) {
-    console.error("❌ GPT-4 final attempt failed:", error);
+
     return {
-      urls: [],
-      investor_contacts: "N/A",
-      amount_raised: "N/A"
-    };
-  }
-}
-
-async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
-  console.log("\n📑 Extracting content from URLs...");
-
-  // Collect content from all URLs
-  const urlContents: string[] = [];
-  for (const url of urls) {
-    if (url === "N/A") continue;
-    
-    try {
-      console.log(`\n🌐 Fetching content from: ${url}`);
-      const content = await fetchUrlContent(url);
-      if (content) {
-        console.log("  ✅ Content fetched successfully");
-        console.log(`  📝 Content length: ${content.length} characters`);
-        urlContents.push(content);
-      } else {
-        console.log("  ⚠️ No content found");
-      }
-    } catch (error) {
-      console.log(`  ❌ Error fetching content: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  if (urlContents.length === 0) {
-    console.log("❌ No content could be extracted from any URL");
-    return {
-      investor_contacts: "N/A",
-      amount_raised: record.amount_raised || "N/A",
-      urls: urls
-    };
-  }
-
-  // Combine all content for analysis
-  const combinedContent = urlContents.join("\n\n=== Next Article ===\n\n");
-  console.log(`📊 Successfully extracted content from ${urlContents.length} URLs`);
-
-  // Use LLaMA to extract investor information
-  try {
-    console.log("\n🦙 Using LLaMA to extract investor information...");
-    const investorInfo = await extractInvestorNamesWithLLM(
-      combinedContent,
-      record.company_name,
-      record.investors || ''
-    );
-    console.log(`✅ Extracted investor information: ${investorInfo}`);
-
-    // Extract amount if not already provided
-    let amount = record.amount_raised;
-    if (!amount || amount === "N/A") {
-      console.log("\n💰 Extracting funding amount...");
-      amount = await extractAmountWithLLM(combinedContent, record.company_name);
-      console.log(`✅ Extracted amount: ${amount}`);
-    } else {
-      console.log(`\n💰 Using provided amount: ${amount}`);
-    }
-
-  return { 
-      investor_contacts: investorInfo,
-      amount_raised: amount,
+      investor_contacts: result.investor_contacts || "N/A",
+      amount_raised: result.amount_raised || "N/A",
       urls: urls
     };
   } catch (error) {
-    console.log(`❌ Error extracting information with LLaMA: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    return {
-      investor_contacts: "N/A",
-      amount_raised: record.amount_raised || "N/A",
-      urls: urls
-  };
+    console.error("❌ GPT-4 extraction failed:", error);
+    return { urls, investor_contacts: "N/A", amount_raised: "N/A" };
   }
 }
 
@@ -784,34 +738,34 @@ ${text.slice(0, 6000)}
 Return ONLY the formatted investor names:`;
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
+      method: "POST",
+      headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
       model: "gpt-3.5-turbo",
-      messages: [
-        {
-          role: "system",
+        messages: [
+          {
+            role: "system",
           content: "You are a precise extractor of investor information from press releases. Return only properly formatted investor names or 'N/A'."
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: 0.1,
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.1,
       max_tokens: 300,
-    }),
-  });
+      }),
+    });
 
-  if (!response.ok) {
+    if (!response.ok) {
     throw new Error(`OpenAI API error: ${response.status}`);
-  }
+    }
 
-  const data = await response.json();
-  const result = data.choices[0]?.message?.content || "N/A";
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content || "N/A";
 
   if (
     result.toLowerCase().includes("n/a") ||
@@ -878,17 +832,17 @@ Return ONLY the formatted names, or "N/A" if no confident matches:`;
   const data = await response.json();
   const result = data.choices[0]?.message?.content || "N/A";
 
-  if (
-    result.toLowerCase().includes("n/a") ||
+    if (
+      result.toLowerCase().includes("n/a") ||
     result.toLowerCase().includes("no individual") ||
     result.toLowerCase().includes("not found") ||
     !result.includes("(") ||
     result.trim().length < 5
-  ) {
-    return "N/A";
-  }
+    ) {
+      return "N/A";
+    }
 
-  return result.trim();
+    return result.trim();
 }
 
 async function extractAmountWithLLM(content: string, companyName: string): Promise<string> {
@@ -948,12 +902,12 @@ Return ONLY the amount, nothing else.`;
       const data = await response.json();
       const amount = data.choices[0].message.content.trim();
       return amount === "N/A" ? "N/A" : amount;
-    } catch (error) {
+  } catch (error) {
       // If it's not a rate limit error and we don't have OpenAI as fallback, return N/A
       if (error.message !== "Rate limit" || !openaiApiKey) {
         console.error("❌ Error extracting amount:", error instanceof Error ? error.message : 'Unknown error');
-        return "N/A";
-      }
+    return "N/A";
+  }
     }
   }
 
