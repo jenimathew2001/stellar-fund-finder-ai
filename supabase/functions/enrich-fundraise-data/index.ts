@@ -32,6 +32,12 @@ interface AnalyzedUrl {
   keywords: string[];
 }
 
+interface ExtractedData {
+  investor_contacts: string;
+  amount_raised: string;
+  urls: string[];
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -72,62 +78,42 @@ serve(async (req) => {
 async function enrichRecordData(record: FundraiseData): Promise<Partial<FundraiseData>> {
   console.log(`\n🚀 Starting enrichment for ${record.company_name}`);
   
-  // Step 1: Try primary SERP API approach
-  console.log("\n📡 Attempting primary SERP search...");
+  // Step 1: Try SERP API approach
+  console.log("\n📡 Attempting SERP search for relevant URLs...");
   const serpResult = await trySerp(record);
-  let urls = [...serpResult.urls];
   
-  // Step 2: If we don't have 3 good URLs, try alternative queries
-  if (urls.includes("N/A")) {
-    console.log("\n🔄 Not enough URLs found, trying alternative queries...");
-    const alternativeUrls = await tryAlternativeSearchQueries(record);
+  if (serpResult.success) {
+    console.log("\n✨ SERP found relevant URLs!");
+    console.log("📑 Using LLaMA to extract information from URL contents...");
     
-    // Replace N/A entries with alternative URLs
-    for (let i = 0; i < urls.length; i++) {
-      if (urls[i] === "N/A" && alternativeUrls.length > 0) {
-        urls[i] = alternativeUrls.shift()!;
-      }
+    const extractedData = await extractDataFromUrls(serpResult.urls, record);
+    
+    if (extractedData.investor_contacts !== "N/A" || extractedData.amount_raised !== "N/A") {
+      console.log("\n✅ Successfully extracted information using SERP + LLaMA");
+      console.log("⏩ Skipping GPT fallback as we have good data");
+      
+      return {
+        press_url_1: extractedData.urls[0] || "N/A",
+        press_url_2: extractedData.urls[1] || "N/A",
+        press_url_3: extractedData.urls[2] || "N/A",
+        investor_contacts: extractedData.investor_contacts,
+        amount_raised: extractedData.amount_raised
+      };
     }
   }
   
-  // Step 3: If still missing URLs, try news APIs
-  if (urls.includes("N/A")) {
-    console.log("\n📰 Still missing URLs, trying news sources...");
-    const newsUrls = await tryNewsAPIs(record);
-    
-    // Replace remaining N/A entries with news URLs
-    for (let i = 0; i < urls.length; i++) {
-      if (urls[i] === "N/A" && newsUrls.length > 0) {
-        urls[i] = newsUrls.shift()!;
-      }
-    }
-  }
+  // Step 2: If SERP failed or couldn't extract good data, use GPT fallback
+  console.log("\n⚠️ SERP approach didn't yield good results");
+  console.log("🤖 Falling back to GPT for complete information...");
+  const gptResult = await tryGPTFallback(record);
   
-  // Step 4: Only if all else fails, try GPT
-  if (urls.includes("N/A")) {
-    console.log("\n🤖 Still missing URLs, trying GPT fallback...");
-    const gptResult = await tryGPTFallback(record);
-    
-    // Replace any remaining N/A entries with GPT results
-    for (let i = 0; i < urls.length; i++) {
-      if (urls[i] === "N/A" && gptResult.urls[i]) {
-        urls[i] = gptResult.urls[i];
-      }
-    }
-  }
-
-  // Log final results
-  console.log("\n🎯 Final Results:");
-  urls.forEach((url, index) => {
-    console.log(`${index + 1}. ${url}`);
-  });
-
+  console.log("\n✅ Using GPT results for all fields");
   return {
-    press_url_1: urls[0],
-    press_url_2: urls[1],
-    press_url_3: urls[2],
-    investor_contacts: urls.some(url => url !== "N/A") ? await extractInvestorInfo(urls, record) : "N/A",
-    amount_raised: record.amount_raised
+    press_url_1: gptResult.urls[0] || "N/A",
+    press_url_2: gptResult.urls[1] || "N/A",
+    press_url_3: gptResult.urls[2] || "N/A",
+    investor_contacts: gptResult.investor_contacts,
+    amount_raised: gptResult.amount_raised
   };
 }
 
@@ -135,7 +121,7 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
   const serpApiKey = Deno.env.get("SERP_API_KEY");
   if (!serpApiKey) {
     console.error("❌ SERP_API_KEY not configured");
-    return {success: false, urls: ["N/A", "N/A", "N/A"]};
+    return {success: false, urls: []};
   }
 
   try {
@@ -161,26 +147,11 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     
     console.log(`\n📊 Found ${organicResults.length} initial results from SERP`);
 
-    // Keywords to look for in content
-    const fundingKeywords = [
-      'raised',
-      'funding',
-      'investment',
-      'investors',
-      'led by',
-      'venture',
-      'capital',
-      'series',
-      'round',
-      'million',
-      'billion'
-    ];
-
     // Analyze content of each URL
     const analyzedUrls: AnalyzedUrl[] = [];
     for (const result of organicResults) {
       const url = result.link;
-      console.log(`\n🌐 Analyzing: ${url}`);
+      console.log(`\n🔍 Analyzing: ${url}`);
       
       try {
         const content = await fetchUrlContent(url);
@@ -189,19 +160,20 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
           continue;
         }
 
-        // Check for company name in content
+        // Check for company name and funding keywords
         const companyNameLower = record.company_name.toLowerCase();
-        if (!content.toLowerCase().includes(companyNameLower)) {
+        const contentLower = content.toLowerCase();
+        
+        if (!contentLower.includes(companyNameLower)) {
           console.log('  ⚠️ Company name not found in content');
           continue;
         }
 
-        // Count funding keywords found
         const foundKeywords = fundingKeywords.filter(keyword => 
-          content.toLowerCase().includes(keyword.toLowerCase())
+          contentLower.includes(keyword.toLowerCase())
         );
 
-        if (foundKeywords.length >= 3) {
+        if (foundKeywords.length >= 2) {
           console.log('  ✅ Relevant content found!');
           console.log(`  📝 Keywords found: ${foundKeywords.join(', ')}`);
           analyzedUrls.push({
@@ -221,35 +193,28 @@ async function trySerp(record: FundraiseData): Promise<{success: boolean, urls: 
     analyzedUrls.sort((a, b) => b.keywordCount - a.keywordCount);
     const topUrls = analyzedUrls.slice(0, 3).map(item => item.url);
 
-    console.log('\n🎯 Analysis Results:');
+    // Log results
     if (topUrls.length > 0) {
-      console.log('Found these relevant press releases:');
+      console.log('\n✅ Found relevant press releases:');
       topUrls.forEach((url, index) => {
         const analysis = analyzedUrls.find(a => a.url === url);
-        if (analysis) {
-          console.log(`\n${index + 1}. ${url}`);
-          console.log(`   Keywords found: ${analysis.keywords.join(', ')}`);
-        }
+        console.log(`\n${index + 1}. ${url}`);
+        console.log(`   Keywords found: ${analysis?.keywords.join(', ')}`);
       });
     } else {
-      console.log('❌ No highly relevant press releases found');
+      console.log('\n❌ No relevant press releases found from SERP');
     }
 
-    // If we don't have 3 URLs, we'll need the GPT fallback
-    const success = topUrls.length === 3;
-    while (topUrls.length < 3) {
-      topUrls.push("N/A");
-    }
-
+    // Consider successful only if we found at least one relevant URL
     return {
-      success,
+      success: topUrls.length > 0,
       urls: topUrls
     };
   } catch (error) {
     console.error("❌ SERP search failed:", error instanceof Error ? error.message : 'Unknown error');
     return {
       success: false,
-      urls: ["N/A", "N/A", "N/A"]
+      urls: []
     };
   }
 }
@@ -282,51 +247,75 @@ function isPressReleaseUrl(url: string, companyName: string): boolean {
   return hasPressReleaseDomain || (hasCompanyName && hasFundingKeywords);
 }
 
-async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<{
-  investor_contacts: string;
-  amount_raised: string;
-}> {
-  console.log(`📥 Extracting content from ${urls.length} URLs...`);
-
-  let allTexts: string[] = [];
-
-  for (const url of urls.slice(0, 3)) {
-    console.log(`🌐 Processing: ${url}`);
+async function extractDataFromUrls(urls: string[], record: FundraiseData): Promise<ExtractedData> {
+  console.log("\n📑 Extracting content from URLs...");
+  
+  // Collect content from all URLs
+  const urlContents: string[] = [];
+  for (const url of urls) {
+    if (url === "N/A") continue;
     
     try {
-      const text = await fetchUrlContent(url);
-      if (text && text.length > 200) {
-        allTexts.push(text);
-        console.log(`✅ Extracted ${text.length} characters`);
+      console.log(`\n🌐 Fetching content from: ${url}`);
+      const content = await fetchUrlContent(url);
+      if (content) {
+        console.log("  ✅ Content fetched successfully");
+        console.log(`  📝 Content length: ${content.length} characters`);
+        urlContents.push(content);
       } else {
-        console.log(`⚠️ Insufficient content from ${url}`);
+        console.log("  ⚠️ No content found");
       }
     } catch (error) {
-      console.error(`❌ Failed to extract from ${url}:`, error);
+      console.log(`  ❌ Error fetching content: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-    
-    // Small delay between requests
-    await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  if (allTexts.length === 0) {
-    console.log("❌ No content extracted from URLs");
-    return { investor_contacts: "N/A", amount_raised: "N/A" };
+  if (urlContents.length === 0) {
+    console.log("❌ No content could be extracted from any URL");
+    return {
+      investor_contacts: "N/A",
+      amount_raised: record.amount_raised || "N/A",
+      urls: urls
+    };
   }
 
-  const combinedText = allTexts.join("\n\n").slice(0, 12000);
-  console.log(`📝 Combined text length: ${combinedText.length} characters`);
+  // Combine all content for analysis
+  const combinedContent = urlContents.join("\n\n=== Next Article ===\n\n");
+  console.log(`📊 Successfully extracted content from ${urlContents.length} URLs`);
 
-  // Extract data using LLM
-  const [investorNames, amountRaised] = await Promise.all([
-    extractInvestorNamesWithLLM(combinedText, record.company_name, record.investors),
-    extractAmountRaisedWithLLM(combinedText, record.company_name),
-  ]);
+  // Use LLaMA to extract investor information
+  try {
+    console.log("\n🦙 Using LLaMA to extract investor information...");
+    const investorInfo = await extractInvestorNamesWithLLM(
+      combinedContent,
+      record.company_name,
+      record.investors || ''
+    );
+    console.log(`✅ Extracted investor information: ${investorInfo}`);
 
-  return { 
-    investor_contacts: investorNames, 
-    amount_raised: amountRaised 
-  };
+    // Extract amount if not already provided
+    let amount = record.amount_raised;
+    if (!amount || amount === "N/A") {
+      console.log("\n💰 Extracting funding amount...");
+      amount = await extractAmountWithLLM(combinedContent, record.company_name);
+      console.log(`✅ Extracted amount: ${amount}`);
+    } else {
+      console.log(`\n💰 Using provided amount: ${amount}`);
+    }
+
+    return {
+      investor_contacts: investorInfo,
+      amount_raised: amount,
+      urls: urls
+    };
+  } catch (error) {
+    console.log(`❌ Error extracting information with LLaMA: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    return {
+      investor_contacts: "N/A",
+      amount_raised: record.amount_raised || "N/A",
+      urls: urls
+    };
+  }
 }
 
 async function fetchUrlContent(url: string): Promise<string> {
@@ -490,73 +479,57 @@ Return ONLY the formatted investor names:`;
   }
 }
 
-async function extractAmountRaisedWithLLM(
-  text: string,
-  companyName: string
-): Promise<string> {
+async function extractAmountWithLLM(content: string, companyName: string): Promise<string> {
   const groqApiKey = Deno.env.get("GROQ_API_KEY");
   if (!groqApiKey) {
     console.error("❌ GROQ_API_KEY not configured");
     return "N/A";
   }
 
-  const prompt = `Extract the exact funding amount raised by ${companyName} from this press release.
+  const prompt = `Extract the funding amount from this press release about ${companyName}.
+  
+CONTENT:
+${content}
 
-INSTRUCTIONS:
-- Look for funding amounts like "$5M", "$10 million", "$2.5B", etc.
-- Return the amount exactly as written (e.g., "$5M" or "$10 million")
-- If no specific amount mentioned, return "N/A"
-- Look for phrases like "raised", "funding", "investment", "round", "secured"
+TASK:
+1. Find the specific funding amount mentioned
+2. Include the currency symbol/code (e.g., $, €, £)
+3. Return in format like "$100 million" or "€50M"
+4. If multiple amounts found, return the main funding round amount
+5. If no clear amount found, return "N/A"
 
-ARTICLE TEXT:
-${text.slice(0, 6000)}
-
-Return only the funding amount:`;
+FORMAT:
+Return ONLY the amount, nothing else.`;
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${groqApiKey}`,
-        "Content-Type": "application/json",
+        "Authorization": `Bearer ${groqApiKey}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: "mixtral-8x7b-32768",
         messages: [
           {
-            role: "system",
-            content: "You extract funding amounts from press releases. Return only the amount or 'N/A'.",
-          },
-          {
             role: "user",
-            content: prompt,
-          },
+            content: prompt
+          }
         ],
         temperature: 0.1,
-        max_tokens: 50,
-      }),
+        max_tokens: 50
+      })
     });
 
     if (!response.ok) {
-      throw new Error(`Groq API error: ${response.status}`);
+      throw new Error(`LLM API error: ${response.status}`);
     }
 
     const data = await response.json();
-    const result = data.choices[0]?.message?.content || "N/A";
-
-    console.log("🤖 LLM Amount Result:", result);
-
-    if (
-      result.toLowerCase().includes("n/a") ||
-      result.toLowerCase().includes("no amount") ||
-      result.trim().length < 2
-    ) {
-      return "N/A";
-    }
-
-    return result.trim();
+    const amount = data.choices[0].message.content.trim();
+    return amount === "N/A" ? "N/A" : amount;
   } catch (error) {
-    console.error("💥 Error extracting amount:", error);
+    console.error("❌ Error extracting amount:", error instanceof Error ? error.message : 'Unknown error');
     return "N/A";
   }
 }
@@ -766,37 +739,7 @@ const fundingKeywords = [
   'raised',
   'funding',
   'investment',
-  'investors'
+  'investors',
+  'funded',
+  'fundraised'
 ];
-
-async function extractInvestorInfo(urls: string[], record: FundraiseData): Promise<string> {
-  // Try to extract investor information from all available URLs
-  let allContent = '';
-  for (const url of urls) {
-    if (url === "N/A") continue;
-    try {
-      const content = await fetchUrlContent(url);
-      if (content) {
-        allContent += ' ' + content;
-      }
-    } catch (error) {
-      console.log(`  ⚠️ Error fetching content from ${url}`);
-    }
-  }
-
-  // If we have content, try to extract investor information
-  if (allContent) {
-    try {
-      const investorInfo = await extractInvestorNamesWithLLM(
-        allContent,
-        record.company_name,
-        record.investors || ''
-      );
-      return investorInfo;
-    } catch (error) {
-      console.log('  ⚠️ Error extracting investor information');
-    }
-  }
-
-  return "N/A";
-}
